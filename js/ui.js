@@ -83,7 +83,10 @@
     },
 
     init() {
+      this.bindKeys();
+      this.bindFlightKeys();
       this.buildTransport();
+      this.buildFlight();
       this.buildCompose();
       this.buildLayer();
       this.buildOutput();
@@ -91,7 +94,6 @@
       this.bindButtons();
       this.bindSounds();
       this.bindPointer();
-      this.bindKeys();
       MR.sounds.onChange(() => { this.renderSounds(); this.renderPool(); });
       MR.history.onChange(() => this.syncHistory());
       this.renderSounds();
@@ -132,17 +134,99 @@
       this.sliders.evolve.set(E.evolveAmount);
     },
 
+    // ------------------------------------------------------------ flight
+    buildFlight() {
+      const F = MR.flight;
+      const c = $('flight-sliders');
+      this.sliders.sensorR = slider(c, { key: 'sensorr', label: 'SENSOR', min: 0.06, max: 0.8, step: 0.01, reset: 0.38,
+        fmt: (v) => `${v.toFixed(2)} U`, onInput: (v) => { F.R = v; } });
+      this.sliders.sensorGain = slider(c, { key: 'sensorgain', label: 'SENSOR LVL', min: 0, max: 1.5, step: 0.01, reset: 1,
+        fmt: pct, onInput: (v) => { F.sensorGain = v; } });
+      this.sliders.headMix = slider(c, { key: 'headmix', label: 'HEADS MIX', min: 0, max: 1, step: 0.01, reset: 0.3,
+        fmt: (v) => (v === 0 ? 'SENSOR ONLY' : pct(v)), onInput: (v) => { F.headMix = v; } });
+      this.sliders.falloff = slider(c, { key: 'falloff', label: 'PROXIMITY', min: 0.15, max: 3, step: 0.01, reset: 0.32,
+        toSlider: (v) => Math.log(v), fromSlider: (s) => Math.round(Math.exp(s) * 100) / 100,
+        fmt: (v) => (v < 0.35 ? `TIGHT ${v.toFixed(2)} U` : v > 1.5 ? `WIDE ${v.toFixed(2)} U` : `${v.toFixed(2)} U`),
+        onInput: (v) => { F.falloff = v; } });
+      // log scale for the slider position
+      this.sliders.falloff.input.min = Math.log(0.15); this.sliders.falloff.input.max = Math.log(3); this.sliders.falloff.input.step = 0.01;
+      this.sliders.thrust = slider(c, { key: 'thrust', label: 'SPEED', min: 0.25, max: 3, step: 0.05, reset: 1,
+        fmt: (v) => `×${v.toFixed(2)}`, onInput: (v) => F.setThrust(v) });
+      this.sliders.sensorR.set(F.R);
+      this.sliders.sensorGain.set(F.sensorGain);
+      this.sliders.headMix.set(F.headMix);
+      this.sliders.thrust.set(F.thrust);
+      this.sliders.falloff.set(F.falloff);
+      $('btn-fly').addEventListener('click', () => this.toggleFlight());
+      this.bindDock();
+      $('btn-autopilot').addEventListener('click', () => this.toggleAutopilot());
+      $('btn-sensor-chance').addEventListener('click', (e) => {
+        F.useChance = !F.useChance;
+        e.target.textContent = F.useChance ? 'PASS: CHANCE' : 'PASS: ALL';
+      });
+    },
+
+    toggleFlight() {
+      const F = MR.flight;
+      if (F.on) F.exit(); else F.enter();
+      $('btn-fly').classList.toggle('on', F.on);
+      $('btn-fly').textContent = F.on ? '✈ LAND' : '✈ FLY';
+      $('hud-mode').textContent = F.on ? 'FLIGHT' : MR.view.mode;
+      $('export-flight-note').hidden = !F.on;
+      if (!F.on) setHTML('flight-readout', '');
+      $('fly-dock').classList.toggle('flying', F.on);
+      $('dock-fly').textContent = F.on ? '✈ LAND' : '✈ FLY';
+      this.syncAutopilot();
+      if (F.on) $('hud-hint').classList.add('gone');
+      this.toast(F.on ? 'flight — autopilot cruising · W/A/S/D to take the stick' : 'landed');
+    },
+    toggleAutopilot() {
+      const F = MR.flight;
+      if (!F.on) return;
+      if (F.autopilot) F.takeManual(); else F.engageAutopilot();
+      this.syncAutopilot();
+    },
+    syncAutopilot() {
+      for (const id of ['btn-autopilot', 'dock-auto']) {
+        const b = $(id);
+        b.classList.toggle('on', MR.flight.autopilot);
+        b.textContent = MR.flight.autopilot ? 'AUTOPILOT' : 'MANUAL';
+      }
+    },
+
+    /** On-canvas dock: FLY/LAND always reachable (mobile panel is hidden), plus
+     *  hold-to-thrust buttons so flight works with touch or mouse alone. */
+    bindDock() {
+      const F = MR.flight;
+      $('dock-fly').addEventListener('click', () => this.toggleFlight());
+      $('dock-auto').addEventListener('click', () => this.toggleAutopilot());
+      const hold = (id, key) => {
+        const b = $(id);
+        const on = (e) => {
+          e.preventDefault();
+          if (!F.on) return;
+          if (F.autopilot) { F.takeManual(); this.syncAutopilot(); }
+          F.keys.add(key);
+          b.classList.add('on');
+        };
+        const off = () => { F.keys.delete(key); b.classList.remove('on'); };
+        b.addEventListener('pointerdown', on);
+        b.addEventListener('pointerup', off);
+        b.addEventListener('pointerleave', off);
+        b.addEventListener('pointercancel', off);
+      };
+      hold('dock-fwd', 'w');
+      hold('dock-back', 's');
+      hold('dock-brake', 'x');
+    },
+
     // ------------------------------------------------------------ compose
     buildCompose() {
       const S = MR.stack, E = MR.engine;
-      const sel = $('style-select');
-      S.STYLE_NAMES.forEach((n) => {
-        const o = document.createElement('option');
-        o.value = n; o.textContent = n;
-        sel.appendChild(o);
-      });
-      sel.value = S.style;
-      sel.addEventListener('change', () => { S.style = sel.value; sel.blur(); });
+      // style picker as buttons: a focused <select> would swallow every shortcut key (type-ahead)
+      this.styleSeg = seg($('style-row'), S.STYLE_NAMES.map((n) => ({ label: n, value: n })),
+        (v) => { S.style = v; this.styleSeg.set(v); });
+      this.styleSeg.set(S.style);
 
       pressable($('btn-new-phrase'), (e) => (e.shiftKey ? this.queuePhrase() : this.newPhrase()), () => this.queuePhrase());
       $('btn-keep').addEventListener('click', () => this.keep());
@@ -488,7 +572,7 @@
       V.sepTarget = V.mode === 'SPLIT' ? 1.85 : 1.25;
       this.sliders.sep.set(V.sepTarget);
       $('btn-mode').textContent = V.mode === 'ORBIT' ? 'SPLIT' : 'ORBIT';
-      $('hud-mode').textContent = V.mode;
+      $('hud-mode').textContent = MR.flight.on ? 'FLIGHT' : V.mode;
     },
 
     toggleOrbit() {
@@ -634,13 +718,18 @@
       const cv = $('stage'), V = MR.view;
       let down = null;
       cv.addEventListener('pointerdown', (e) => {
-        down = { x: e.clientX, y: e.clientY, yaw: V.dragYaw, pitch: V.dragPitch, moved: false };
+        down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: V.dragYaw, pitch: V.dragPitch, moved: false };
         cv.setPointerCapture(e.pointerId);
       });
       cv.addEventListener('pointermove', (e) => {
         if (down) {
           const dx = e.clientX - down.x, dy = e.clientY - down.y;
           if (Math.abs(dx) + Math.abs(dy) > 4) { down.moved = true; cv.classList.add('dragging'); }
+          if (MR.flight.on) {
+            MR.flight.look((e.clientX - down.lx) * 0.004, -(e.clientY - down.ly) * 0.004);
+            down.lx = e.clientX; down.ly = e.clientY;
+            return;
+          }
           V.dragYaw = down.yaw - dx * 0.005;
           V.dragPitch = down.pitch + dy * 0.004;
           return;
@@ -675,17 +764,44 @@
       cv.addEventListener('pointerleave', () => { if (!down) V.hover = null; });
       cv.addEventListener('wheel', (e) => {
         e.preventDefault();
+        if (MR.flight.on) {
+          MR.flight.R = clamp(MR.flight.R * Math.exp(-e.deltaY * 0.001), 0.06, 0.8);
+          this.sliders.sensorR.set(MR.flight.R);
+          return;
+        }
         V.zoom = clamp(V.zoom * Math.exp(e.deltaY * 0.001), 0.45, 2.2);
       }, { passive: false });
-      cv.addEventListener('dblclick', () => { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; });
+      cv.addEventListener('dblclick', () => { if (!MR.flight.on) { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; } });
     },
 
     bindKeys() {
       const S = MR.stack;
       window.addEventListener('keydown', (e) => {
         const tag = e.target.tagName;
-        if ((tag === 'INPUT' && e.target.type !== 'range') || tag === 'SELECT' || tag === 'TEXTAREA') return;
+        // only text entry swallows shortcuts (a focused file input / button must not)
+        const TEXT = ['text', 'search', 'email', 'number', 'password', 'url', 'tel'];
+        if ((tag === 'INPUT' && TEXT.includes(e.target.type)) || tag === 'SELECT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
         const k = e.key;
+        const F = MR.flight;
+        const mod = e.metaKey || e.ctrlKey || e.altKey;
+        if (mod) F.keys.clear(); // macOS drops letter keyups while ⌘ is held: never leave thrust stuck
+        // flight controls match physical keys (e.code) so any keyboard layout works
+        const code = e.code || '';
+        const letter = code.startsWith('Key') ? code.slice(3).toLowerCase() : k.toLowerCase();
+        if (F.on && !mod) {
+          if (code.startsWith('Shift')) { F.keys.add('shift'); return; }
+          if (letter.length === 1 && 'wasdqex'.includes(letter)) {
+            e.preventDefault();
+            if (letter !== 'x' && F.autopilot) { F.takeManual(); this.syncAutopilot(); this.toast('manual — C re-engages autopilot'); }
+            F.keys.add(letter);
+            return;
+          }
+          if (e.repeat) return;
+          if (letter === 'c') { this.toggleAutopilot(); return; }
+          if (k === 'Escape') { this.toggleFlight(); return; }
+        }
+        if (e.repeat && k !== 'ArrowLeft' && k !== 'ArrowRight') return; // held keys don't re-toggle
+        if (letter === 'f' && !mod) { this.toggleFlight(); return; }
         if ((e.metaKey || e.ctrlKey) && (k === 'z' || k === 'Z')) {
           e.preventDefault();
           if (e.shiftKey) this.redo(); else this.undo();
@@ -714,6 +830,17 @@
       });
     },
 
+    bindFlightKeys() {
+      const F = MR.flight;
+      window.addEventListener('keyup', (e) => {
+        const code = e.code || '';
+        if (code.startsWith('Key')) F.keys.delete(code.slice(3).toLowerCase());
+        else if (code.startsWith('Shift')) F.keys.delete('shift');
+        else F.keys.delete(e.key.toLowerCase());
+      });
+      window.addEventListener('blur', () => F.keys.clear()); // no stuck thrust
+    },
+
     // ------------------------------------------------------------ per-frame HUD
     updateHud(tv) {
       const V = MR.view, E = MR.engine, S = MR.stack;
@@ -734,6 +861,21 @@
         `<span class="k">CUT</span> ${p.cut}${p.choke ? ' · CHOKE' : ''} <span class="k">STYLE</span> ${S.style}`,
         `<span class="k">TRIG</span> ${pad(E.stats.triggers, 6)}`,
       ];
+      const F = MR.flight;
+      if (F.on) {
+        const n = F.near;
+        const P = F.polar(F.pos, 0);
+        rows = [
+          `<span class="k">FLIGHT</span> <span class="big">${F.autopilot ? 'AUTOPILOT' : 'MANUAL'}</span>`,
+          `<span class="k">SPD</span> ${F.speed().toFixed(2)} U/S <span class="k">SENSOR</span> ${F.R.toFixed(2)} U`,
+          `<span class="k">X</span> ${signed(F.pos[0], 2)} <span class="k">R</span> ${P.r.toFixed(2)} <span class="k">θ</span> ${(mod(P.th, TAU) * 180 / Math.PI).toFixed(1)}°`,
+          n ? `<span class="k">NEAR</span> <span class="big">${n.plate.name}</span> <span class="k">ΔX</span> ${signed(n.dx, 2)}${n.inside ? ' · IN FIELD' : ''}` : `<span class="k">NEAR</span> —`,
+          n ? `<span class="k">FLAM</span> <span class="big">${signed(n.flamMs, 1)} MS</span> <span class="k">=</span> ${signed(n.steps, 2)} STEP` : '',
+          n ? `<span class="k">STEP</span> ${n.stepMs.toFixed(1)} MS` : '',
+          `<span class="k">SENSOR HITS</span> ${pad(F.stats.sensor, 6)}`,
+        ];
+        setHTML('flight-readout', n ? `${n.plate.name} · FLAM ${signed(n.flamMs, 1)} MS` : 'OPEN SPACE');
+      }
       E.pending.forEach((sw) => {
         rows.push(`<span class="k">QUEUED</span> <span class="big">${sw.label}</span> @ BAR ${(Math.floor(sw.beat / 4) % S.phraseBars) + 1}`);
       });

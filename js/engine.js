@@ -182,6 +182,8 @@
       this.nextBarBeat = 4;
       this.lastVoice.clear();
       this.playing = true;
+      // the flight path switches to the audio clock before the first tick reads it
+      if (MR.flight && MR.flight.on) MR.flight.clockChanged();
       this.startTimer();
     },
 
@@ -190,6 +192,7 @@
       const B = this.beatAt(this.ctx.currentTime);
       MR.stack.plates.forEach((p) => p.stopMotion(B));
       this.playing = false;
+      if (MR.flight && MR.flight.on) MR.flight.clockChanged();
       this.stopTimer();
       this.active.forEach((src) => { try { src.stop(); } catch (e) { /* already stopped */ } });
       this.active.clear();
@@ -325,6 +328,8 @@
         if (this.onlyPlate ? p !== this.onlyPlate : !p.audible(anySolo)) continue;
         this.schedulePlate(p, Ba, Bb);
       }
+      // the ship is a moving read head (live only: exports render the fixed heads)
+      if (!this.offline && MR.flight && MR.flight.on) MR.flight.schedule(this, Ba, Bb);
     },
 
     /** Find every head crossing of every chip in beats [Ba, Bb), fire in time order. */
@@ -358,7 +363,9 @@
         }
       }
       hits.sort((x, y) => x.B - y.B);
-      for (const hit of hits) this.fire(p, hit.c, this.timeAtBeat(hit.B), hit.h, hit.B);
+      const mix = !this.offline && MR.flight && MR.flight.on ? MR.flight.headMix : 1;
+      if (mix <= 0) return;
+      for (const hit of hits) this.fire(p, hit.c, this.timeAtBeat(hit.B), hit.h, hit.B, mix);
     },
 
     /** Chance roll. Offline renders hash (seed, plate, chip, beat) so a stem
@@ -369,9 +376,17 @@
       return mulberry32(h)();
     },
 
-    fire(p, c, t, headAngle, B) {
+    fire(p, c, t, headAngle, B, gainMul = 1, extra = null) {
       this.stats.scheduled++;
-      if (this.roll(p, c, B) > p.probFor(c)) return;
+      const sensor = !!(extra && extra.sensor);
+      // every asteroid the ship passes sounds, unless flight is set to respect plate chance
+      const useChance = !sensor || (MR.flight && MR.flight.useChance);
+      if (useChance && this.roll(p, c, B) > p.probFor(c)) return;
+      // in flight, a fixed-head grain is as loud as it is close to the ship
+      if (!sensor && !this.offline && MR.flight && MR.flight.on) {
+        gainMul *= MR.flight.proximity(p, c, t, headAngle);
+        if (gainMul < 0.004) return; // inaudible: don't spend a voice on it
+      }
       const fx = this.fxOn ? c.fx : null;
       if (fx === 'ratchet' || fx === 'stutter') {
         const n = c.fxN;
@@ -380,14 +395,14 @@
         for (let k = 0; k < n; k++) {
           const tk = t + k * sub;
           const ok = this.playGrain(p, c, tk, headAngle, {
-            maxDur: sub * 0.92, gainMul: 1 - k * 0.12, semis: fx === 'stutter' ? k * stepSemis : 0,
+            maxDur: sub * 0.92, gainMul: gainMul * (1 - k * 0.12), semis: fx === 'stutter' ? k * stepSemis : 0, extra,
           });
-          if (ok && !this.offline) this.events.push({ t: tk, plate: p, chip: c });
+          if (ok && !this.offline) this.events.push({ t: tk, plate: p, chip: c, sensor });
         }
         return;
       }
-      if (this.playGrain(p, c, t, headAngle, { reverse: fx === 'reverse', throw: fx === 'throw' }) && !this.offline) {
-        this.events.push({ t, plate: p, chip: c });
+      if (this.playGrain(p, c, t, headAngle, { reverse: fx === 'reverse', throw: fx === 'throw', gainMul, extra }) && !this.offline) {
+        this.events.push({ t, plate: p, chip: c, sensor });
       }
     },
 
@@ -445,7 +460,8 @@
       src.start(when, off, srcDur);
       src.stop(when + playDur + 0.02);
 
-      const voice = { start: when, end: when + playDur, choke, choked: false, plate: p.index, offset, snd: snd.id, key: c.key, reverse: !!opt.reverse };
+      const voice = { start: when, end: when + playDur, choke, choked: false, plate: p.index, offset, snd: snd.id, key: c.key, reverse: !!opt.reverse, gain: amp,
+        sensor: !!(opt.extra && opt.extra.sensor), dist: opt.extra ? opt.extra.dist : null, head: headAngle };
       if (p.choke) {
         const prev = this.lastVoice.get(p);
         if (prev && prev.end > when && prev.start < when) {
@@ -504,6 +520,11 @@
     },
 
     distanceTone(p, pose) {
+      if (!this.offline && MR.flight && MR.flight.on) {
+        // flying: plates darken with distance along the axis from the ship
+        const ax = Math.abs(MR.view.plateX(p) - pose.pos[0]);
+        return clamp(18000 * Math.exp(-ax * 1.1 / Math.max(0.2, MR.flight.falloff)), 500, 18000);
+      }
       const dx = MR.view.plateX(p) - pose.pos[0], dy = -pose.pos[1], dz = -pose.pos[2];
       const d = Math.hypot(dx, dy, dz);
       return clamp(18000 * Math.exp(-(d - 4.5) * 0.32), 700, 18000);
@@ -512,7 +533,8 @@
     /** Per frame: listener follows the camera; far plates get darker. */
     updateSpace(cam) {
       if (!this.ctx) return;
-      const pose = this.earMode === 'camera' ? cam : MR.view.homePose();
+      // in flight the listener is always the ship
+      const pose = this.earMode === 'camera' || (MR.flight && MR.flight.on) ? cam : MR.view.homePose();
       const now = this.ctx.currentTime;
       this.setListener(this.ctx, pose, true);
       MR.stack.plates.forEach((p, i) => {

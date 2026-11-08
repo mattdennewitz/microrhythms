@@ -119,8 +119,14 @@
       const right = [pose.right[0] * c + pose.up[0] * s, pose.right[1] * c + pose.up[1] * s, pose.right[2] * c + pose.up[2] * s];
       const up = [pose.up[0] * c - pose.right[0] * s, pose.up[1] * c - pose.right[1] * s, pose.up[2] * c - pose.right[2] * s];
       this.pos = pose.pos; this.fwd = pose.fwd; this.right = right; this.up = up;
+      const F = MR.flight;
+      this.near = F && F.on ? 0.03 : 0.2;
+      if (F && F.on) {
+        const sp = F.pose();
+        this.pos = sp.pos; this.fwd = sp.fwd; this.right = sp.right; this.up = sp.up;
+      }
       const narrow = this.w < this.h;
-      this.F = (narrow ? this.w * 0.78 : this.h * 1.05);
+      this.F = (narrow ? this.w * 0.78 : this.h * (F && F.on ? 0.8 : 1.05));
       const panelW = (MR.ui && MR.ui.panelWidth()) * this.dpr || 0;
       this.cx = (this.w - panelW) * 0.5;
       const panelOpen = !document.body.classList.contains('panel-hidden');
@@ -131,7 +137,7 @@
     project(x, y, z) {
       const dx = x - this.pos[0], dy = y - this.pos[1], dz = z - this.pos[2];
       const zc = dx * this.fwd[0] + dy * this.fwd[1] + dz * this.fwd[2];
-      if (zc < 0.2) return null;
+      if (zc < (this.near || 0.2)) return null;
       const xc = dx * this.right[0] + dy * this.right[1] + dz * this.right[2];
       const yc = dx * this.up[0] + dy * this.up[1] + dz * this.up[2];
       const s = this.F / zc;
@@ -177,6 +183,7 @@
     draw(tv, playing, wallSec) {
       const g = this.g, W = this.w, H = this.h, dpr = this.dpr;
       this.frame++;
+      this.lim = Math.max(W, H) * 3;
       g.globalCompositeOperation = 'source-over';
       g.globalAlpha = 1;
       g.fillStyle = '#050607';
@@ -237,6 +244,7 @@
       g.save(); g.translate(-ox, -oy); g.fillRect(0, 0, W + 256, H + 256); g.restore();
       g.globalAlpha = 1;
       g.globalCompositeOperation = 'source-over';
+      if (MR.flight && MR.flight.on) this.drawFlightHud(g, tv);
     },
 
     drawBackdrop(g) {
@@ -286,7 +294,7 @@
       for (let i = 0; i <= segs; i++) {
         const a = a0 + (a1 - a0) * (i / segs);
         const q = this.pp(X, r, a);
-        if (!q) { started = false; continue; }
+        if (!q || Math.abs(q[0]) > this.lim || Math.abs(q[1]) > this.lim) { started = false; continue; }
         if (!started) { path.moveTo(q[0], q[1]); started = true; } else path.lineTo(q[0], q[1]);
       }
     },
@@ -296,8 +304,10 @@
       const X = this.plateX(p);
       const phi = p.angleAt(tv, playing);
       const center = this.project(X, 0, 0);
-      if (!center) return;
-      const s = center[3];
+      const flyingNow = MR.flight && MR.flight.on;
+      // in first person a plate's centre can be behind you while its chips are in front
+      if (!center && !flyingNow) return;
+      const s = center ? center[3] : this.F / 0.6;
       const audible = p.audible(anySolo);
       const sel = MR.stack.selected === p.index;
       const resting = playing && MR.stack.restAt(p, this.beat);
@@ -375,7 +385,7 @@
         g.stroke(it);
       }
 
-      if (p.style.reticle) {
+      if (p.style.reticle && center) {
         const q = center;
         const r = 7 * dpr;
         g.strokeStyle = `rgba(235,240,242,${0.7 * dim})`;
@@ -400,7 +410,8 @@
         }
       }
       g.lineWidth = lw;
-      g.strokeStyle = `rgba(240,244,246,${resting ? 0.06 : (0.3 + 0.6 * fireK) * dim})`;
+      const flying = MR.flight && MR.flight.on ? 0.35 : 1; // heads would streak across the cockpit
+      g.strokeStyle = `rgba(240,244,246,${resting ? 0.06 : (0.3 + 0.6 * fireK) * dim * flying})`;
       g.stroke(headPath);
       g.fillStyle = `rgba(230,236,240,${(0.05 + 0.22 * fireK) * dim})`;
       g.fill(wedge);
@@ -419,6 +430,7 @@
           const q0 = this.pp(X, c.radius - dth / 2, a - hwA), q1 = this.pp(X, c.radius + dth / 2, a - hwA);
           const q2 = this.pp(X, c.radius + dth / 2, a + hwA), q3 = this.pp(X, c.radius - dth / 2, a + hwA);
           if (!q0 || !q1 || !q2 || !q3) continue;
+          if (q0[2] < 0.4 || Math.abs(q0[0]) > this.lim || Math.abs(q0[1]) > this.lim) continue;
           dust.moveTo(q0[0], q0[1]); dust.lineTo(q1[0], q1[1]); dust.lineTo(q2[0], q2[1]); dust.lineTo(q3[0], q3[1]); dust.closePath();
         }
         g.fillStyle = `rgba(220,225,230,${0.2 * dim})`;
@@ -434,8 +446,11 @@
         const q0 = this.pp(X, r0, a - hwA), q1 = this.pp(X, r1, a - hwA);
         const q2 = this.pp(X, r1, a + hwA), q3 = this.pp(X, r0, a + hwA);
         if (!q0 || !q1 || !q2 || !q3) continue;
+        if (q0[2] < 0.08 || Math.abs(q0[0]) > this.lim || Math.abs(q0[1]) > this.lim || Math.abs(q2[0]) > this.lim || Math.abs(q2[1]) > this.lim) continue;
         const k = playing && c.lastFire <= tv ? Math.exp(-(tv - c.lastFire) / 0.12) : 0;
-        let b = (0.25 + 0.55 * p.gainFor(c) * (0.4 + 0.6 * p.probFor(c))) * dim + k;
+        // asteroids right in front of the cockpit fade out unless they're sounding
+        const nearK = this.near < 0.1 ? clamp((q0[2] - 0.08) / 0.7, 0, 1) : 1;
+        let b = (0.25 + 0.55 * p.gainFor(c) * (0.4 + 0.6 * p.probFor(c))) * dim * nearK + k;
         const hover = this.hover && this.hover.chip === c;
         if (hover) b = 1.2;
         const bi = clamp(Math.floor(b * 5), 0, 4);
@@ -468,6 +483,8 @@
         }
       }
 
+      if (MR.flight && MR.flight.on) this.drawSensorGate(g, p, X, tv, lw);
+
       // selection brackets
       if (sel) {
         const top = this.pp(X, p.rOut + 0.18, Math.PI / 2), bot = this.pp(X, p.rOut + 0.18, -Math.PI / 2);
@@ -481,6 +498,98 @@
           g.stroke();
         }
       }
+    },
+
+    /** Where the ship reads this plate: a gate at (r_s, θ_s), brighter as you close in. */
+    drawSensorGate(g, p, X, tv, lw) {
+      const Fl = MR.flight;
+      const P = Fl.polar(Fl.pos, X);
+      const R = Fl.R;
+      const reach = R * 4;
+      if (Math.abs(P.dx) > reach || P.r < Math.max(0.05, p.rIn - R) || P.r > p.rOut + R) return;
+      const prox = 1 - Math.abs(P.dx) / reach;
+      const band = Math.sqrt(Math.max(0, R * R - P.dx * P.dx));
+      const live = band > 0;
+      const k = live ? Math.exp(-Math.max(0, tv - (p.lastSensor || -1e9)) / 0.1) : 0;
+      const path = new Path2D();
+      const r0 = Math.max(0.02, P.r - Math.max(band, 0.015)), r1 = P.r + Math.max(band, 0.015);
+      const q0 = this.pp(X, r0, P.th), q1 = this.pp(X, r1, P.th);
+      if (q0 && q1) { path.moveTo(q0[0], q0[1]); path.lineTo(q1[0], q1[1]); }
+      const span = Math.max(0.05, (band || R * 0.3) / Math.max(0.1, P.r));
+      this.ring(path, X, r0, P.th - span, P.th + span, 10);
+      this.ring(path, X, r1, P.th - span, P.th + span, 10);
+      g.lineWidth = lw * (live ? 1.8 : 1);
+      g.strokeStyle = `rgba(255,255,255,${(live ? 0.55 + 0.45 * k : 0.25) * prox})`;
+      if (!live) g.setLineDash([3 * this.dpr, 4 * this.dpr]);
+      g.stroke(path);
+      g.setLineDash([]);
+    },
+
+    /** Cockpit overlay: reticle, velocity marker, side-view minimap. */
+    drawFlightHud(g, tv) {
+      const Fl = MR.flight, dpr = this.dpr;
+      const cx = this.cx, cy = this.cy;
+      g.save();
+      g.globalCompositeOperation = 'source-over';
+      g.strokeStyle = 'rgba(240,244,246,0.75)';
+      g.lineWidth = 1 * dpr;
+      // reticle
+      const rr = 14 * dpr;
+      g.beginPath(); g.arc(cx, cy, rr, 0, TAU); g.stroke();
+      g.beginPath();
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dx, dy]) => { g.moveTo(cx + dx * rr * 1.4, cy + dy * rr * 1.4); g.lineTo(cx + dx * rr * 2.2, cy + dy * rr * 2.2); });
+      g.stroke();
+      // velocity marker: where we're actually heading
+      const v = Fl.autopilot ? null : Fl.vel;
+      const sp = Fl.speed();
+      if (sp > 0.01) {
+        const dir = v ? v : (() => { const a = Fl.apPos(Fl.clock()), b = Fl.apPos(Fl.clock() + 0.2); return [b[0] - a[0], b[1] - a[1], b[2] - a[2]]; })();
+        const q = this.project(this.pos[0] + dir[0] * 50, this.pos[1] + dir[1] * 50, this.pos[2] + dir[2] * 50);
+        if (q && Math.abs(q[0] - cx) < this.w && Math.abs(q[1] - cy) < this.h) {
+          g.beginPath(); g.arc(q[0], q[1], 4 * dpr, 0, TAU);
+          g.moveTo(q[0] - 9 * dpr, q[1]); g.lineTo(q[0] - 5 * dpr, q[1]);
+          g.moveTo(q[0] + 5 * dpr, q[1]); g.lineTo(q[0] + 9 * dpr, q[1]);
+          g.moveTo(q[0], q[1] - 5 * dpr); g.lineTo(q[0], q[1] - 9 * dpr);
+          g.stroke();
+        }
+      }
+      // minimap: side view, axis horizontal, radius vertical
+      const S = MR.stack;
+      const mw = Math.min(300 * dpr, (this.w - (MR.ui ? MR.ui.panelWidth() * dpr : 0)) * 0.36), mh = 96 * dpr;
+      const mx = (this.w - (MR.ui ? MR.ui.panelWidth() * dpr : 0)) - mw - 22 * dpr, my = this.h - mh - 46 * dpr;
+      const xs = S.plates.map((p) => this.plateX(p));
+      const x0 = Math.min(...xs) - 1.2, x1 = Math.max(...xs) + 1, rMax = 2.1;
+      const toX = (x) => mx + ((x - x0) / (x1 - x0)) * mw;
+      const toY = (r) => my + mh - (r / rMax) * mh;
+      g.fillStyle = 'rgba(5,6,7,0.55)';
+      g.fillRect(mx - 6 * dpr, my - 14 * dpr, mw + 12 * dpr, mh + 20 * dpr);
+      g.strokeStyle = 'rgba(232,236,238,0.18)';
+      g.strokeRect(mx - 6 * dpr, my - 14 * dpr, mw + 12 * dpr, mh + 20 * dpr);
+      g.beginPath(); g.moveTo(mx, toY(0)); g.lineTo(mx + mw, toY(0)); g.stroke();
+      const anySolo = S.anySolo();
+      S.plates.forEach((p) => {
+        const X = toX(this.plateX(p));
+        const near = Fl.near && Fl.near.plate === p;
+        g.strokeStyle = `rgba(240,244,246,${near ? 0.95 : p.audible(anySolo) ? 0.5 : 0.2})`;
+        g.lineWidth = (near ? 3 : 2) * dpr;
+        g.beginPath(); g.moveTo(X, toY(p.rIn)); g.lineTo(X, toY(p.rOut)); g.stroke();
+      });
+      const P = Fl.polar(Fl.pos, 0);
+      const sx = toX(Fl.pos[0]), sy = toY(Math.min(rMax, P.r));
+      const sr = (Fl.R / (x1 - x0)) * mw;
+      g.lineWidth = 1 * dpr;
+      g.strokeStyle = 'rgba(255,255,255,0.8)';
+      g.beginPath(); g.arc(sx, sy, Math.max(2 * dpr, sr), 0, TAU); g.stroke();
+      g.fillStyle = 'rgba(255,255,255,1)';
+      g.beginPath(); g.arc(sx, sy, 2.2 * dpr, 0, TAU); g.fill();
+      const hd = Fl.heading();
+      const dr = P.r > 1e-3 ? (hd[1] * Fl.pos[1] + hd[2] * Fl.pos[2]) / P.r : 0; // radial part of the heading
+      g.beginPath(); g.moveTo(sx, sy); g.lineTo(sx + hd[0] * 14 * dpr, sy - dr * 14 * dpr); g.stroke();
+      g.font = `${Math.round(8 * dpr)}px "IBM Plex Mono", ui-monospace, monospace`;
+      g.fillStyle = 'rgba(232,236,238,0.6)';
+      g.textBaseline = 'top';
+      g.fillText(`SIDE VIEW · AXIS × RADIUS · ${Fl.autopilot ? 'AUTOPILOT' : 'MANUAL'}`, mx, my - 12 * dpr);
+      g.restore();
     },
 
     /** Static outer scale ring with spokes, numbering and arc text. */

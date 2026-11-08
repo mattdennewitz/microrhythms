@@ -23,10 +23,20 @@
     </div>
     <div class="hud-tr" id="hud-tr"></div>
     <div class="hud-bl" id="meters"></div>
-    <div class="hud-hint" id="hud-hint">SPACE / ▶ TO SPIN THE STACK · DROP AUDIO ANYWHERE TO SAMPLE IT</div>
+    <div class="hud-hint" id="hud-hint">SPACE / ▶ TO SPIN THE STACK · F TO FLY THROUGH IT · DROP AUDIO ANYWHERE TO SAMPLE IT</div>
   </div>
 
   <button id="panel-toggle" class="ghost" title="Toggle panel (P)">≡ PANEL</button>
+
+  <div id="fly-dock" aria-label="Flight controls">
+    <button id="dock-fly" class="ghost" title="Fly / land (F)">✈ FLY</button>
+    <span class="dock-flight">
+      <button id="dock-auto" class="ghost on" title="Autopilot / manual (C)">AUTOPILOT</button>
+      <button id="dock-fwd" class="ghost" title="Hold: thrust forward (W)">▲ THRUST</button>
+      <button id="dock-back" class="ghost" title="Hold: reverse (S)">▼</button>
+      <button id="dock-brake" class="ghost" title="Hold: brake (X)">■ BRAKE</button>
+    </span>
+  </div>
 
   <aside id="panel">
     <section class="block">
@@ -43,12 +53,23 @@
       </div>
     </section>
 
+    <section class="block" id="flight-block">
+      <header>FLIGHT <span class="dim" id="flight-readout"></span></header>
+      <div class="row">
+        <button id="btn-fly" class="primary" title="Fly through the plates (F) — your position becomes a read head">✈ FLY</button>
+        <button id="btn-autopilot" class="on" title="Cruise the field on a fixed path (C)">AUTOPILOT</button>
+        <button id="btn-sensor-chance" title="Sensor hits: every chip you pass, or roll each plate's CHANCE">PASS: ALL</button>
+      </div>
+      <div id="flight-sliders"></div>
+      <p class="hint">W/S thrust · A/D strafe · Q/E down/up · ⇧ boost · X brake · drag to look · wheel = sensor size · C autopilot · Esc lands. PROXIMITY sets how fast plates fade with distance from the ship. Chips that pass within the sensor sound; each sounds again Δθ/ω after the plate's head — fly toward the head to tighten the flam.</p>
+    </section>
+
     <section class="block">
       <header>COMPOSE <span class="dim" id="pos-readout"></span></header>
       <div class="row">
         <button id="btn-new-phrase" class="primary" title="Draw a new phrase for every plate not on hold (N). Shift-click or hold: at the next phrase line.">NEW PHRASE</button>
-        <select id="style-select" title="Direction of the next draw"></select>
       </div>
+      <div class="row seg styles" id="style-row" title="Direction of the next draw"></div>
       <div class="row keeps" id="keep-row">
         <button id="btn-keep" title="Keep the phrase you hear in the next free slot (K)">KEEP</button>
       </div>
@@ -115,12 +136,13 @@
         <button id="btn-export-stems" title="One WAV per audible plate, zipped">⤓ STEMS .ZIP</button>
       </div>
       <p class="hint" id="export-status">renders from bar 1 with the current stack · 24-bit 48 kHz</p>
+      <p class="hint" id="export-flight-note" hidden>flight sensor hits are live only — exports render the plates' fixed heads</p>
     </section>
 
     <section class="block help">
       <header>HANDLING</header>
       <p>Drag to orbit · wheel to zoom · click a plate to select · <b>shift-click</b> a cell to add/remove a chip · <b>alt-click</b> a chip to cycle its FX · hover a chip to inspect its fragment.</p>
-      <p>Keys: <b>space</b> play · <b>N</b> new phrase (<b>⇧N</b> at phrase end) · <b>K</b> keep · <b>⌘Z</b> undo · <b>H</b> hold · <b>S</b> split · <b>O</b> orbit · <b>R</b> regen · <b>M</b> mute · <b>1–7</b> select · <b>P</b> panel</p>
+      <p>Keys: <b>F</b> fly · <b>space</b> play · <b>N</b> new phrase (<b>⇧N</b> at phrase end) · <b>K</b> keep · <b>⌘Z</b> undo · <b>H</b> hold · <b>S</b> split · <b>O</b> orbit · <b>R</b> regen · <b>M</b> mute · <b>1–7</b> select · <b>P</b> panel</p>
     </section>
   </aside>
 
@@ -133,6 +155,7 @@
   <script src="js/engine.js"></script>
   <script src="js/history.js"></script>
   <script src="js/export.js"></script>
+  <script src="js/flight.js"></script>
   <script src="js/render.js"></script>
   <script src="js/ui.js"></script>
   <script src="js/main.js"></script>

@@ -59,6 +59,36 @@ Inspired by the phrase tooling in [phrz](https://nokbeats.com/tools/phrz), adapt
   toggles choose what's drawn, and alt-click a chip to cycle its FX. Ratchets show as
   split bars, reverse as hollow outlines, throws with an echo dot.
 
+## Flight
+
+Press **F** (or **✈ FLY**) to pilot a ship through the plates as if they were asteroid
+fields. The ship is a **moving read head**:
+
+- For each plate within the **SENSOR** radius, your position in that plate's plane
+  gives a radius and an angle. Chips sound as they rotate past that angle, if their
+  track is within the sensor in 3D. They're louder the closer they pass and are
+  spatialised around you (the listener is the ship).
+- **Micro-micro rhythms come from where you are.** Every chip already sounds at the
+  plate's fixed head; parked at an angle Δθ from it, you hear the same chip again
+  Δθ/ω later. Fly toward the head and the flam tightens to a few milliseconds; pull
+  away and it opens into its own counter-rhythm. The HUD shows the live **FLAM** in ms
+  and in steps. Radius chooses which tracks you hear, depth chooses which plates, and
+  the sensor size (mouse wheel) chooses how many.
+- **Autopilot** (default, `C`) cruises a closed-form path that threads the annuli up
+  and down the stack. **W/S** thrust, **A/D** strafe, **Q/E** down/up, **⇧** boost,
+  **X** brake, drag to look; any thrust key takes the stick. **Esc** lands. Flight keys
+  match physical keys, so they work on any keyboard layout. The on-canvas dock (FLY/LAND,
+  AUTOPILOT, hold-to-THRUST, reverse, BRAKE) makes flight work with a mouse or touch alone.
+- **Proximity is the mix.** While flying, every grain from a plate's fixed head is
+  scaled by 1 / (1 + (d / PROXIMITY)²), where d is the distance from the ship to where
+  the grain sounds. Each plate's tone also darkens with its distance along the axis.
+  Parked beside a plate you hear that plate; neighbours sit ~25 dB down and far
+  plates vanish. Turn **PROXIMITY** up (WIDE) to hear more of the field at once.
+- **HEADS MIX** sets the plates' fixed heads underneath (0 = sensor only).
+  **PASS: ALL** makes every chip you pass sound; **PASS: CHANCE** rolls each plate's
+  CHANCE instead. A side-view minimap (axis × radius) shows the fields and your sensor.
+- Sensor hits are live only: exports render the plates' fixed heads.
+
 ## Fragments
 
 - **CUT**: `overlap` (start anywhere), `divide` (equal `SLICES`), `transient` (start

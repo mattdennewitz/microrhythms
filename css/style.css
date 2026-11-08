@@ -156,3 +156,16 @@ body.panel-hidden #toast { margin-left: 0; }
   .hud-hint { display: none; }
   .slider { grid-template-columns: 70px 1fr 48px; }
 }
+.styles button { font-size: 8px; padding: 4px 6px; margin-bottom: -1px; }
+
+/* on-canvas flight dock */
+#fly-dock { position: fixed; left: calc((100vw - var(--panel-w)) / 2); transform: translateX(-50%); bottom: 40px; display: flex; gap: 6px; z-index: 6; transition: left .25s ease; }
+body.panel-hidden #fly-dock { left: 50vw; }
+#fly-dock .dock-flight { display: none; gap: 6px; }
+#fly-dock.flying .dock-flight { display: flex; }
+#fly-dock button { touch-action: none; user-select: none; -webkit-user-select: none; }
+#fly-dock button.on { color: var(--bg); background: var(--ink); }
+@media (max-width: 760px) {
+  #fly-dock { left: 50vw; bottom: calc(48vh + 52px); }
+  body.panel-hidden #fly-dock { bottom: 52px; }
+}

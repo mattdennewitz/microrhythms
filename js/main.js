@@ -12,6 +12,7 @@
     window.MR_DEBUG = {
       get triggers() { return MR.engine.stats.triggers; },
       get scheduled() { return MR.engine.stats.scheduled; },
+      get sensor() { return MR.flight.stats.sensor; },
       get dropped() { return MR.engine.stats.dropped; },
       get voices() { return MR.engine.voices; },
       get playing() { return MR.engine.playing; },
@@ -34,12 +35,14 @@
           if (ev.t <= tv) {
             if (ev.t > ev.chip.lastFire) ev.chip.lastFire = ev.t;
             if (ev.t > ev.plate.lastFire) ev.plate.lastFire = ev.t;
+            if (ev.sensor && !(ev.plate.lastSensor > ev.t)) ev.plate.lastSensor = ev.t;
             ev.plate.fireCount++;
           } else pending.push(ev);
         }
         E.events = pending;
       }
 
+      if (MR.flight.on) MR.flight.update(tv);
       V.updateCamera(now / 1000);
       E.updateSpace(V);
       E.readMeters();
