@@ -96,27 +96,57 @@
 
   const exporter = {
     phrases: 1,
-    mode: 'loop',      // 'loop' | 'tail'
+    mode: 'tail',      // 'tail' (as played) | 'loop' (tail folded onto the start)
     busy: false,
     last: null,        // last result, kept for tests
 
     seconds() { return this.phrases * MR.stack.phraseBars * 4 * 60 / MR.engine.bpm; },
-    baseName() { return `orbital-${Math.round(MR.engine.bpm)}bpm-${this.phrases * MR.stack.phraseBars}bars`; },
-
-    async render(onlyPlate) {
-      const L = this.seconds();
-      const buf = await MR.engine.renderOffline({ seconds: L, tail: 4, onlyPlate });
-      return this.mode === 'loop' ? foldLoop(buf, L) : buf;
+    baseName(plan) {
+      const bar = plan ? Math.floor(plan.startBeat / 4) + 1 : 1;
+      return `orbital-${Math.round(MR.engine.bpm)}bpm-${this.phrases * MR.stack.phraseBars}bars-from${bar}${plan && plan.flight ? '-flight' : ''}`;
     },
 
-    async exportWav({ save = true } = {}) {
+    /** Render what PLAY plays: the song from bar 1. Stopped, that's exactly what the
+     *  next PLAY will produce (plates from their start, the paused ship carrying on);
+     *  playing, it's this PLAY from bar 1, with the plates as they have moved. */
+    plan() {
+      const E = MR.engine, S = MR.stack;
+      const playing = E.playing && E.ctx;
+      const startBeat = 0;
+      const motions = playing ? new Map(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
+      const flight = MR.flight.on ? MR.flight.exportCtx() : null;
+      // while playing, replay the tempo map since PLAY (offline time 0 = bar 1)
+      let clock = null;
+      if (playing) {
+        const t0 = E.timeAtBeat(0);
+        clock = E.clock.map((s) => ({ t0: s.t0 - t0, b0: s.b0, bps: s.bps }));
+        clock[0] = { t0: 0, b0: 0, bps: clock[0].bps };
+      }
+      const listenerPose = flight ? null : E.listenerPose(MR.view);
+      return { startBeat, motions, flight, clock, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
+    },
+
+    beats() { return this.phrases * MR.stack.phraseBars * 4; },
+    async render(onlyPlate, plan, onProgress) {
+      const pl = plan || this.plan();
+      const buf = await MR.engine.renderOffline(Object.assign({ beats: this.beats(), tail: 4, onlyPlate, onProgress }, pl));
+      return this.mode === 'loop' ? foldLoop(buf, buf.loopSeconds) : buf;
+    },
+
+    describe(plan) {
+      const bar = Math.floor(plan.startBeat / 4) + 1;
+      return `from bar ${bar}${plan.flight ? ` · flight, ${plan.flight.where}` : ''}`;
+    },
+
+    async exportWav({ save = true, onProgress } = {}) {
       if (this.busy) return null;
       this.busy = true;
       try {
-        const buf = await this.render(null);
+        const plan = this.plan();
+        const buf = await this.render(null, plan, onProgress ? (f) => onProgress(0, 1, 'mix', f) : null);
         const wav = encodeWav(buf);
-        const name = `${this.baseName()}${this.mode === 'loop' ? '-loop' : ''}.wav`;
-        this.last = { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf) };
+        const name = `${this.baseName(plan)}${this.mode === 'loop' ? '-loop' : ''}.wav`;
+        this.last = { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf), from: this.describe(plan) };
         if (save) download(new Blob([wav], { type: 'audio/wav' }), name);
         return this.last;
       } finally { this.busy = false; }
@@ -129,14 +159,15 @@
         const anySolo = MR.stack.anySolo();
         const plates = MR.stack.plates.filter((p) => p.audible(anySolo));
         const files = [];
+        const plan = this.plan(); // one plan for every stem, so they sum to the mix
         for (let i = 0; i < plates.length; i++) {
-          if (onProgress) onProgress(i, plates.length, plates[i].name);
-          const buf = await this.render(plates[i]);
+          if (onProgress) onProgress(i, plates.length, plates[i].name, 0);
+          const buf = await this.render(plates[i], plan, onProgress ? (f) => onProgress(i, plates.length, plates[i].name, f) : null);
           files.push({ name: `${plates[i].name}.wav`, data: encodeWav(buf) });
         }
         const blob = zip(files);
-        const name = `${this.baseName()}-stems.zip`;
-        this.last = { name, blob, files: files.map((f) => f.name) };
+        const name = `${this.baseName(plan)}-stems.zip`;
+        this.last = { name, blob, files: files.map((f) => f.name), from: this.describe(plan) };
         if (save) download(blob, name);
         return this.last;
       } finally { this.busy = false; }

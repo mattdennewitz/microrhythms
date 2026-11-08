@@ -12,10 +12,10 @@
     return buf;
   }
 
-  function normalize(d, peak = 0.9) {
+  function normalize(d, peak = 0.9, maxGain = Infinity) {
     let m = 0;
     for (let i = 0; i < d.length; i++) m = Math.max(m, Math.abs(d[i]));
-    if (m > 0) { const g = peak / m; for (let i = 0; i < d.length; i++) d[i] *= g; }
+    if (m > 0) { const g = Math.min(peak / m, maxGain); for (let i = 0; i < d.length; i++) d[i] *= g; }
     return d;
   }
 
@@ -211,23 +211,34 @@
     }
     const flux = new Float32Array(frames);
     for (let f = 1; f < frames; f++) flux[f] = Math.max(0, env[f] - env[f - 1]);
-    let peak = 0;
-    for (let f = 0; f < frames; f++) peak = Math.max(peak, flux[f]);
-    const out = [0];
+    let peak = 0, maxEnv = 0;
+    for (let f = 0; f < frames; f++) { peak = Math.max(peak, flux[f]); maxEnv = Math.max(maxEnv, env[f]); }
+    // every peak above a local + absolute threshold, then the strongest 255 in time order
+    const cand = [];
     const W = 10, minGap = Math.round(0.05 * sr / hop);
     let last = -minGap;
     for (let f = 1; f < frames - 1; f++) {
       if (flux[f] < flux[f - 1] || flux[f] < flux[f + 1]) continue;
       let m = 0, n = 0;
       for (let k = Math.max(0, f - W); k < Math.min(frames, f + W); k++) { m += flux[k]; n++; }
-      if (flux[f] > (m / n) * 1.6 + peak * 0.06 && f - last >= minGap) {
+      const thr = Math.max((m / n) * 1.6 + peak * 0.06, 0.02 * maxEnv);
+      if (flux[f] > thr && f - last >= minGap) {
         const t = Math.max(0, (f - 1) * hop / sr);
-        if (t > 0.01) out.push(t);
+        if (t > 0.01) cand.push({ t, s: flux[f] });
         last = f;
-        if (out.length >= 256) break;
       }
     }
-    return out;
+    // too many: drop the weakest half, then sample evenly in time so the whole file is reachable
+    let pool = cand;
+    if (pool.length > 255) {
+      const sorted = pool.slice().sort((a, b) => b.s - a.s);
+      const floor = sorted[Math.min(sorted.length - 1, 510)].s;
+      pool = pool.filter((c) => c.s >= floor);
+    }
+    const keep = [];
+    if (pool.length > 255) for (let i = 0; i < 255; i++) keep.push(pool[Math.floor((i * pool.length) / 255)]);
+    else keep.push(...pool);
+    return [0].concat(keep.map((c) => c.t));
   }
 
   /** Mono-ise, trim silence, cap length, normalise. */
@@ -239,15 +250,21 @@
       const d = buffer.getChannelData(c);
       for (let i = 0; i < len; i++) mono[i] += d[i] / ch;
     }
+    // remove DC so trimming and normalising act on the signal, not an offset
+    let mean = 0;
+    for (let i = 0; i < len; i++) mean += mono[i];
+    mean /= Math.max(1, len);
+    if (mean) for (let i = 0; i < len; i++) mono[i] -= mean;
     let peak = 0;
     for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(mono[i]));
+    if (peak < 1e-3) throw new Error('sound is silent or too short'); // below about −60 dBFS
     const thr = peak * 0.004;
     let a = 0, b = len - 1;
     while (a < len && Math.abs(mono[a]) < thr) a++;
     while (b > a && Math.abs(mono[b]) < thr) b--;
     const trimmed = mono.slice(Math.max(0, a - 64), Math.min(len, b + 64));
     if (trimmed.length < 64) throw new Error('sound is silent or too short');
-    normalize(trimmed, 0.92);
+    normalize(trimmed, 0.92, 100); // at most +40 dB, so a near-silent take isn't blown up into noise
     return makeBuffer(trimmed, buffer.sampleRate);
   }
 

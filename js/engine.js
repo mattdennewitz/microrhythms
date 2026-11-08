@@ -31,21 +31,33 @@
     voices: 0,
     active: new Set(),
     lastScheduled: 0,
+    startDelay: 0.06,       // PLAY starts bar 1 this long after the press
     clock: [{ t0: 0, b0: 0, bps: 112 / 60 }],
     nextBarBeat: 4,
     pending: [],            // queued switches {beat, kind, apply, label}
     events: [],             // visual events {t, plate, chip}
-    lastVoice: new Map(),   // plate -> last voice (for choke)
+    chokeVoices: new Map(), // plate -> scheduled voices (for choke)
     stats: { triggers: 0, dropped: 0, scheduled: 0 },
     buses: [],
     timer: null,
-    rollSeed: null,         // hashed chance rolls (offline render)
+    // Chance rolls hash (session seed, plate, chip, beat): live playback varies beat to
+    // beat, and an export of the same beats reproduces exactly the hits you heard.
+    rollSeed: (Math.random() * 4294967296) >>> 0,
+    sensorCursor: null,     // ship pose that ended the last scheduled window
+    shipWin: null,          // live: ship path over the window being scheduled
     motions: null,          // per-plate motion override (offline render)
     onlyPlate: null,        // render a single plate (stems)
     trace: null,            // optional array of scheduled grains (tests)
     onEvolve: null,
     onSwitch: null,
 
+
+    /** Flight parameters in force for this engine: the live ship, or the export's
+     *  frozen copy of it. null when not flying. */
+    flightCtx() {
+      if (this.offline) return this.flightRender || null;
+      return MR.flight && MR.flight.on ? MR.flight.liveCtx() : null;
+    },
 
     // ------------------------------------------------------------ graph
     ensureCtx() {
@@ -175,13 +187,16 @@
       const ctx = this.ensureCtx();
       if (ctx.state !== 'running') { try { await ctx.resume(); } catch (e) { /* gesture needed */ } }
       if (this.playing) return;
-      const t = ctx.currentTime + 0.06;
+      const t = ctx.currentTime + this.startDelay;
       this.clock = [{ t0: t, b0: 0, bps: this.bpm / 60 }];
       MR.stack.plates.forEach((p) => p.startMotion());
       this.lastScheduled = t;
       this.nextBarBeat = 4;
-      this.lastVoice.clear();
+      this.chokeVoices.clear();
+      this.sensorCursor = null;
       this.playing = true;
+      // the flight path switches to the audio clock before the first tick reads it
+      if (MR.flight && MR.flight.on) MR.flight.clockChanged();
       this.startTimer();
     },
 
@@ -190,6 +205,7 @@
       const B = this.beatAt(this.ctx.currentTime);
       MR.stack.plates.forEach((p) => p.stopMotion(B));
       this.playing = false;
+      if (MR.flight && MR.flight.on) MR.flight.clockChanged();
       this.stopTimer();
       this.active.forEach((src) => { try { src.stop(); } catch (e) { /* already stopped */ } });
       this.active.clear();
@@ -295,7 +311,7 @@
           if (p && this.onEvolve) this.onEvolve(p);
         }
       }
-      while (this.clock.length > 1 && this.clock[1].t0 < now - 30) this.clock.shift();
+      // the tempo history is kept whole since PLAY: exports replay it (start() resets it)
       if (this.events.length > 4000) this.events.splice(0, this.events.length - 4000);
     },
 
@@ -321,10 +337,16 @@
     scheduleBeats(Ba, Bb) {
       if (Bb <= Ba) return;
       const anySolo = MR.stack.anySolo();
+      // live flight: fix the ship's path over this window first (sensor and proximity
+      // both read it, and it's recorded so an export replays exactly the same path)
+      if (!this.offline && MR.flight && MR.flight.on) MR.flight.prepareWindow(this, Ba, Bb);
       for (const p of MR.stack.plates) {
         if (this.onlyPlate ? p !== this.onlyPlate : !p.audible(anySolo)) continue;
         this.schedulePlate(p, Ba, Bb);
       }
+      // the ship is a moving read head (live, or replayed by an export)
+      const fc = this.flightCtx();
+      if (fc) MR.flight.schedule(this, Ba, Bb, fc);
     },
 
     /** Find every head crossing of every chip in beats [Ba, Bb), fire in time order. */
@@ -358,20 +380,31 @@
         }
       }
       hits.sort((x, y) => x.B - y.B);
-      for (const hit of hits) this.fire(p, hit.c, this.timeAtBeat(hit.B), hit.h, hit.B);
+      const fcm = this.flightCtx();
+      const mix = fcm ? fcm.headMix : 1;
+      if (mix <= 0) return;
+      for (const hit of hits) this.fire(p, hit.c, this.timeAtBeat(hit.B), hit.h, hit.B, mix);
     },
 
     /** Chance roll. Offline renders hash (seed, plate, chip, beat) so a stem
      *  rolls exactly like the same plate inside the full mix. */
     roll(p, c, B) {
-      if (this.rollSeed == null) return Math.random();
       const h = (this.rollSeed ^ p.seed ^ Math.imul(c.key + 1, 0x27d4eb2d) ^ Math.imul(Math.round(B * 1000) + 7, 0x165667b1)) >>> 0;
       return mulberry32(h)();
     },
 
-    fire(p, c, t, headAngle, B) {
+    fire(p, c, t, headAngle, B, gainMul = 1, extra = null) {
       this.stats.scheduled++;
-      if (this.roll(p, c, B) > p.probFor(c)) return;
+      const sensor = !!(extra && extra.sensor);
+      const fc = this.flightCtx();
+      // every asteroid the ship passes sounds, unless flight is set to respect plate chance
+      const useChance = !sensor || (fc && fc.useChance);
+      if (useChance && this.roll(p, c, B) > p.probFor(c)) return;
+      // in flight, a fixed-head grain is as loud as it is close to the ship
+      if (!sensor && fc) {
+        gainMul *= MR.flight.proximityAt(fc.shipAt(t), p, c, headAngle, fc.falloff);
+        if (gainMul < 0.004) return; // inaudible: don't spend a voice on it
+      }
       const fx = this.fxOn ? c.fx : null;
       if (fx === 'ratchet' || fx === 'stutter') {
         const n = c.fxN;
@@ -380,14 +413,14 @@
         for (let k = 0; k < n; k++) {
           const tk = t + k * sub;
           const ok = this.playGrain(p, c, tk, headAngle, {
-            maxDur: sub * 0.92, gainMul: 1 - k * 0.12, semis: fx === 'stutter' ? k * stepSemis : 0,
+            maxDur: sub * 0.92, gainMul: gainMul * (1 - k * 0.12), semis: fx === 'stutter' ? k * stepSemis : 0, extra,
           });
-          if (ok && !this.offline) this.events.push({ t: tk, plate: p, chip: c });
+          if (ok && !this.offline) this.events.push({ t: tk, plate: p, chip: c, sensor });
         }
         return;
       }
-      if (this.playGrain(p, c, t, headAngle, { reverse: fx === 'reverse', throw: fx === 'throw' }) && !this.offline) {
-        this.events.push({ t, plate: p, chip: c });
+      if (this.playGrain(p, c, t, headAngle, { reverse: fx === 'reverse', throw: fx === 'throw', gainMul, extra }) && !this.offline) {
+        this.events.push({ t, plate: p, chip: c, sensor });
       }
     },
 
@@ -408,10 +441,11 @@
 
     playGrain(p, c, when, headAngle, opt = {}) {
       if (!this.offline && this.voices >= this.maxVoices) { this.stats.dropped++; return false; }
+      let chokeList = null;
       if (p.choke) {
         // a choked plate is monophonic: a second grain at the same instant is dropped
-        const prev = this.lastVoice.get(p);
-        if (prev && Math.abs(prev.start - when) < 1e-6) return false;
+        chokeList = (this.chokeVoices.get(p) || []).filter((v) => v.end > when - 0.5);
+        if (chokeList.some((v) => Math.abs(v.start - when) < 1e-6)) return false;
       }
       const pool = MR.sounds.poolFor(p);
       if (!pool.length) return false;
@@ -445,15 +479,23 @@
       src.start(when, off, srcDur);
       src.stop(when + playDur + 0.02);
 
-      const voice = { start: when, end: when + playDur, choke, choked: false, plate: p.index, offset, snd: snd.id, key: c.key, reverse: !!opt.reverse };
-      if (p.choke) {
-        const prev = this.lastVoice.get(p);
-        if (prev && prev.end > when && prev.start < when) {
-          prev.choke.gain.setTargetAtTime(0, when, 0.0025);
-          prev.choked = true;
-          prev.chokedAt = when;
+      const voice = { start: when, end: when + playDur, choke, choked: false, plate: p.index, offset, snd: snd.id, key: c.key, reverse: !!opt.reverse, gain: amp,
+        sensor: !!(opt.extra && opt.extra.sensor), dist: opt.extra ? opt.extra.dist : null, head: headAngle };
+      if (chokeList) {
+        // grains can be scheduled out of order (ratchets run ahead): cut every voice
+        // sounding at `when`, and cut this one where an already-scheduled voice starts
+        for (const v of chokeList) {
+          if (v.start < when && v.end > when && !(v.chokedAt <= when)) {
+            v.choke.gain.setTargetAtTime(0, when, 0.0025);
+            v.choked = true;
+            v.chokedAt = when;
+          }
         }
-        this.lastVoice.set(p, voice);
+        let tc = Infinity;
+        for (const v of chokeList) if (v.start > when && v.start < when + playDur) tc = Math.min(tc, v.start);
+        if (tc < Infinity) { choke.gain.setTargetAtTime(0, tc, 0.0025); voice.choked = true; voice.chokedAt = tc; }
+        chokeList.push(voice);
+        this.chokeVoices.set(p, chokeList);
       }
       if (this.trace) this.trace.push(voice);
 
@@ -464,6 +506,8 @@
           if (this.active.delete(src)) this.voices = Math.max(0, this.voices - 1);
           src.disconnect(); env.disconnect(); choke.disconnect(); pan.disconnect();
         };
+      } else {
+        src.onended = () => { src.disconnect(); env.disconnect(); choke.disconnect(); pan.disconnect(); };
       }
       this.stats.triggers++;
       return true;
@@ -488,6 +532,12 @@
       return pan;
     },
 
+    /** Where the live listener is: the ship in flight, else camera or home view. */
+    listenerPose(cam) {
+      if (MR.flight && MR.flight.on) return cam;
+      return this.earMode === 'camera' ? cam : MR.view.homePose();
+    },
+
     setListener(ctx, pose, smooth) {
       const L = ctx.listener;
       const now = ctx.currentTime;
@@ -504,6 +554,12 @@
     },
 
     distanceTone(p, pose) {
+      const fc = this.flightCtx();
+      if (fc) {
+        // flying: plates darken with distance along the axis from the ship
+        const ax = Math.abs(MR.view.plateX(p) - pose.pos[0]);
+        return clamp(18000 * Math.exp(-ax * 1.1 / Math.max(0.2, fc.falloff)), 500, 18000);
+      }
       const dx = MR.view.plateX(p) - pose.pos[0], dy = -pose.pos[1], dz = -pose.pos[2];
       const d = Math.hypot(dx, dy, dz);
       return clamp(18000 * Math.exp(-(d - 4.5) * 0.32), 700, 18000);
@@ -512,7 +568,8 @@
     /** Per frame: listener follows the camera; far plates get darker. */
     updateSpace(cam) {
       if (!this.ctx) return;
-      const pose = this.earMode === 'camera' ? cam : MR.view.homePose();
+      // in flight the listener is always the ship
+      const pose = this.listenerPose(cam);
       const now = this.ctx.currentTime;
       this.setListener(this.ctx, pose, true);
       MR.stack.plates.forEach((p, i) => {
@@ -546,36 +603,96 @@
     },
 
     // ------------------------------------------------------------ offline render
-    /** Render the current stack from bar 1 for `seconds` (+tail) into an AudioBuffer.
-     *  Uses the same scheduler on an OfflineAudioContext; chance is seeded. */
-    async renderOffline({ seconds, tail = 4, onlyPlate = null, seed = 20261108, sampleRate = 48000, trace = false }) {
+    /** Render the stack from song beat `startBeat` for `seconds` (+tail) into an
+     *  AudioBuffer, with the same scheduler on an OfflineAudioContext.
+     *  - motions: plate motion to use (default: aligned from bar 1)
+     *  - flight:  a frozen flight context (MR.flight.exportCtx) to replay the ship
+     *  - listenerPose: static listener when not flying (default: home view)
+     *  Chance uses the live roll seed, so the same beats roll the same way. */
+    async renderOffline({ seconds, beats = null, tail = 4, onlyPlate = null, seed = this.rollSeed, sampleRate = 48000, trace = false,
+      startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null, onProgress = null }) {
+      // tempo map: the played one (export while playing), else the current tempo
+      const offClock = clock || [{ t0: 0, b0: startBeat, bps: this.bpm / 60 }];
+      if (beats != null) {
+        const tmp = Object.create(engine); tmp.clock = offClock;
+        seconds = tmp.timeAtBeat(startBeat + beats);
+      }
       const octx = new OfflineAudioContext(2, Math.ceil((seconds + tail) * sampleRate), sampleRate);
       const off = Object.create(engine);
       off.ctx = octx;
       off.offline = true;
       off.playing = true;
       Object.assign(off, this.buildGraph(octx));
-      off.clock = [{ t0: 0, b0: 0, bps: this.bpm / 60 }];
-      off.motions = new Map(MR.stack.plates.map((p) => [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
+      off.clock = offClock;
+      off.motions = motions || new Map(MR.stack.plates.map((p) => [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
+      off.flightRender = flight;
+      off.sensorCursor = null;
       off.active = new Set();
       off.voices = 0;
       off.events = [];
       off.pending = [];
-      off.lastVoice = new Map();
+      off.chokeVoices = new Map();
       off.stats = { triggers: 0, dropped: 0, scheduled: 0 };
       off.rollSeed = seed >>> 0;
       off.onlyPlate = onlyPlate;
       off.trace = trace ? [] : null;
-      const pose = MR.view.homePose(); // deterministic stereo image, not the drifting camera
-      off.setListener(octx, pose, false);
-      MR.stack.plates.forEach((p, i) => {
-        off.buses[i].level.gain.value = p.level;
-        off.buses[i].tone.frequency.value = off.distanceTone(p, pose);
-      });
-      off.scheduleBeats(0, seconds * (this.bpm / 60));
+      MR.stack.plates.forEach((p, i) => { off.buses[i].level.gain.value = p.level; });
+      if (flight) {
+        // the listener rides the ship; plate tone follows its distance
+        const L = octx.listener;
+        const step = 0.05, total = seconds + tail;
+        for (let t = 0; t <= total + 1e-9; t += step) {
+          const pose = flight.poseAt(t);
+          if (L.positionX) {
+            const set = (param, v) => (t === 0 ? param.setValueAtTime(v, 0) : param.linearRampToValueAtTime(v, t));
+            set(L.positionX, pose.pos[0]); set(L.positionY, pose.pos[1]); set(L.positionZ, pose.pos[2]);
+            set(L.forwardX, pose.fwd[0]); set(L.forwardY, pose.fwd[1]); set(L.forwardZ, pose.fwd[2]);
+            set(L.upX, pose.up[0]); set(L.upY, pose.up[1]); set(L.upZ, pose.up[2]);
+          } else if (t === 0) {
+            L.setPosition(...pose.pos); L.setOrientation(...pose.fwd, ...pose.up);
+          }
+          MR.stack.plates.forEach((p, i) => {
+            const f = off.distanceTone(p, pose);
+            const param = off.buses[i].tone.frequency;
+            if (t === 0) param.setValueAtTime(f, 0); else param.linearRampToValueAtTime(f, t);
+          });
+          if (!flight.moving) break; // parked: one pose is the whole render
+        }
+      } else {
+        const pose = listenerPose || MR.view.homePose();
+        off.setListener(octx, pose, false);
+        MR.stack.plates.forEach((p, i) => { off.buses[i].tone.frequency.value = off.distanceTone(p, pose); });
+      }
+      // schedule in ~0.1 s windows like the live scheduler (keeps a moving ship's ψ
+      // linear), a little ahead of the render via suspend/resume, so node count stays
+      // bounded and progress can be reported
+      const B1 = off.beatAt(seconds), chunk = 0.1 * (this.bpm / 60);
+      let k = 0;
+      const scheduleUntil = (Bt) => {
+        const lim = Math.min(Bt, B1);
+        for (;;) {
+          const Ba = startBeat + k * chunk;
+          if (Ba >= lim) break;
+          off.scheduleBeats(Ba, Math.min(B1, startBeat + (k + 1) * chunk));
+          k++;
+        }
+      };
+      const AHEAD = 1.5, STEP = 1;
+      const quantum = 128 / sampleRate;
+      scheduleUntil(off.beatAt(AHEAD));
+      for (let s = STEP; s < seconds; s += STEP) {
+        const at = Math.ceil(s / quantum) * quantum;
+        octx.suspend(at).then(() => {
+          scheduleUntil(off.beatAt(at + AHEAD));
+          if (onProgress) onProgress(at / (seconds + tail));
+          octx.resume();
+        });
+      }
       const buf = await octx.startRendering();
+      if (onProgress) onProgress(1);
       buf.triggers = off.stats.triggers;
       buf.trace = off.trace;
+      buf.loopSeconds = seconds;
       return buf;
     },
 

@@ -247,7 +247,7 @@
     pushSeg(Bs, phi) {
       this.motion = this.motion.filter((s) => s.b0 < Bs);
       this.motion.push({ b0: Bs, phi0: phi, w: this.omega() });
-      while (this.motion.length > 2 && this.motion[1].b0 < Bs - 64) this.motion.shift();
+      // no pruning: an export replays everything since PLAY (startMotion resets it)
     }
     /** From beat Bs, run as if these params had been running since bar 1:
      *  steps land on the grid and plates re-align at phrase starts. */

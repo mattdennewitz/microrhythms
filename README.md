@@ -59,6 +59,41 @@ Inspired by the phrase tooling in [phrz](https://nokbeats.com/tools/phrz), adapt
   toggles choose what's drawn, and alt-click a chip to cycle its FX. Ratchets show as
   split bars, reverse as hollow outlines, throws with an echo dot.
 
+## Flight
+
+Press **F** (or **✈ FLY**) to pilot a ship through the plates as if they were asteroid
+fields. The ship is a **moving read head**:
+
+- For each plate within the **SENSOR** radius, your position in that plate's plane
+  gives a radius and an angle. Chips sound as they rotate past that angle, if their
+  track is within the sensor in 3D. They're louder the closer they pass and are
+  spatialised around you (the listener is the ship).
+- **Micro-micro rhythms come from where you are.** Every chip already sounds at the
+  plate's fixed head; parked at an angle Δθ from it, you hear the same chip again
+  Δθ/ω later. Fly toward the head and the flam tightens to a few milliseconds; pull
+  away and it opens into its own counter-rhythm. The HUD shows the live **FLAM** in ms
+  and in steps. Radius chooses which tracks you hear, depth chooses which plates, and
+  the sensor size (mouse wheel) chooses how many.
+- **Autopilot** (default, `C`) cruises a closed-form path that threads the annuli up
+  and down the stack. **W/S** thrust, **A/D** strafe, **Q/E** down/up, **⇧** boost,
+  **X** brake, drag to look; any thrust key takes the stick. **Esc** lands. Flight keys
+  match physical keys, so they work on any keyboard layout. The on-canvas dock (FLY/LAND,
+  AUTOPILOT, hold-to-THRUST, reverse, BRAKE) makes flight work with a mouse or touch alone.
+- **Proximity is the mix.** While flying, every grain from a plate's fixed head is
+  scaled by 1 / (1 + (d / PROXIMITY)²), where d is the distance from the ship to where
+  the grain sounds. Each plate's tone also darkens with its distance along the axis.
+  Parked beside a plate you hear that plate; neighbours sit ~25 dB down and far
+  plates vanish. Turn **PROXIMITY** up (WIDE) to hear more of the field at once.
+- **HEADS MIX** sets the plates' fixed heads underneath (0 = sensor only).
+  **PASS: ALL** makes every chip you pass sound; **PASS: CHANCE** rolls each plate's
+  CHANCE instead. A side-view minimap (axis × radius) shows the fields and your sensor.
+- The autopilot cruises only while the music plays: stop and the ship holds its
+  place (❚❚), press play and it carries on from there.
+- Landing remembers where you were: take off again and the flight resumes from the same
+  position, heading and mode (and autopilot phase). **↺ RESTART PATH** starts over at the
+  first plate.
+- Exports render what the ship hears from bar 1, exactly as PLAY plays it (see Output).
+
 ## Fragments
 
 - **CUT**: `overlap` (start anywhere), `divide` (equal `SLICES`), `transient` (start
@@ -71,10 +106,24 @@ Inspired by the phrase tooling in [phrz](https://nokbeats.com/tools/phrz), adapt
 
 ## Output
 
-**EXPORT WAV** renders the mix offline from bar 1 (1, 2 or 4 phrases), either as an
-exact **LOOP** (the tail is folded onto the start) or **WITH TAIL**. **STEMS .ZIP**
-renders one WAV per audible plate. The files are 24-bit / 48 kHz, and chance is seeded
-so the same stack renders the same.
+**EXPORT WAV** renders **what PLAY plays**: the song from bar 1 (1, 2 or 4 phrases).
+Every PLAY starts the song at bar 1, so when stopped the export is exactly what your
+next PLAY will produce; while playing it's this PLAY from bar 1. Chance rolls are
+deterministic per beat, so the export has the same hits you hear. In flight it renders
+the ship's sensor hits, the proximity mix and the listener at the ship: parked or flying
+by hand, from where you are; on autopilot, with the paused path carrying on exactly as
+it does after PLAY. **AS PLAYED** (default) keeps the reverb/delay tail at the end;
+**LOOP** folds it onto the start for seamless looping (so bar 1 then carries the tail).
+**STEMS .ZIP** renders one WAV per audible plate from the same plan. The files are
+24-bit / 48 kHz.
+
+## Projects
+
+**⤓ SAVE .JSON** downloads the whole machine: global, view and export settings, every
+plate (patterns, edits, FX, holds), the keep slots, flight settings and the ship's
+position, the chance seed (so a reopened project exports the same hits) and your own
+sounds, embedded as 16-bit audio. **⤒ OPEN .JSON** replaces the current machine with a
+saved one (playback stops; undo history starts fresh).
 
 ## Your own sounds
 
@@ -92,6 +141,8 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 
 - Drag to orbit, wheel to zoom, double-click to reset the view.
 - Click a plate to select it; **shift-click** a cell to add or remove a chip.
+- The level meters (bottom left) each have an **M** toggle: click to mute that plate,
+  shift-click to solo it. Click the level itself to select the plate.
 - Hover a chip to see which fragment it holds (sound, offset, length, rate).
 - **ORBIT / SPLIT** (`S`) changes separation; **AUTO-ORBIT** (`O`) drifts the camera.
 - **EAR: CAMERA** makes the listener ride the camera, so orbiting moves the sound
@@ -102,6 +153,21 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
   `⌘Z`/`⇧⌘Z` undo/redo · `H` hold · `S` split · `O` orbit · `r`/`R` regen layer/all ·
   `m`/`M` mute/mutate all · `1–7` or arrows select · `P` panel.
 - Shift-click a cell to add/remove a chip; alt-click a chip to cycle its FX.
+
+## Keyboard & accessibility
+
+- Everything works from the keyboard. **Tab** to the stack canvas, then **arrows** move a
+  cell cursor on the selected plate (**PgUp/PgDn** change plate), **Enter** adds/removes a
+  chip, **⇧Enter** cycles its FX, **[ ]** orbit, **− =** zoom, **0** resets the view; in
+  flight the arrows look around. Keep slots: **Enter** = next bar, **⇧Enter** = next
+  phrase, **Delete** releases.
+- **Space** plays from the page or the stack; on a focused control it activates that control.
+- Single-letter shortcuts follow physical keys (Caps Lock and other layouts are safe) and
+  can be switched off under HANDLING; they then work only while the stack has focus.
+- Toggles expose their pressed state, sliders announce the value shown (not the raw
+  position), and play/stop, queued and fired switches and export progress are announced.
+- The hidden panel leaves the tab order; dim text meets 4.5:1 contrast; targets are at
+  least 24 px; the page has headings and landmarks. Checked with axe-core (0 violations).
 
 ## Files
 
@@ -114,6 +180,7 @@ js/sounds.js      synthesized built-ins, sample library, decoding, onsets
 js/engine.js      beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
 js/history.js     undo / redo snapshots
 js/export.js      WAV encoder, ZIP writer, loop folding, export actions
+js/project.js     save / open the whole machine as JSON
 js/render.js      perspective camera + Canvas2D line-art, picking
 js/ui.js          panel, HUD readouts, meters, pointer/keyboard
 js/main.js        boot + frame loop (exposes window.MR_DEBUG)
