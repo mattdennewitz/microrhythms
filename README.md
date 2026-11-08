@@ -87,7 +87,9 @@ fields. The ship is a **moving read head**:
 - **HEADS MIX** sets the plates' fixed heads underneath (0 = sensor only).
   **PASS: ALL** makes every chip you pass sound; **PASS: CHANCE** rolls each plate's
   CHANCE instead. A side-view minimap (axis × radius) shows the fields and your sensor.
-- Sensor hits are live only: exports render the plates' fixed heads.
+- The autopilot cruises only while the music plays: stop and the ship holds its
+  place (❚❚), press play and it carries on from there.
+- Exports render what the ship hears (see Output).
 
 ## Fragments
 
@@ -101,10 +103,14 @@ fields. The ship is a **moving read head**:
 
 ## Output
 
-**EXPORT WAV** renders the mix offline from bar 1 (1, 2 or 4 phrases), either as an
-exact **LOOP** (the tail is folded onto the start) or **WITH TAIL**. **STEMS .ZIP**
-renders one WAV per audible plate. The files are 24-bit / 48 kHz, and chance is seeded
-so the same stack renders the same.
+**EXPORT WAV** renders **what you are hearing**: while playing, from the start of the
+current phrase (1, 2 or 4 phrases), with the plates exactly as they are moving; when
+stopped, from bar 1. Chance rolls are deterministic per beat, so the export contains the
+same hits you heard. In flight it renders the ship's sensor hits, the proximity mix and
+the listener at the ship: parked or flying by hand, from where you are; on autopilot,
+along the path in sync with the song. Export as an exact **LOOP** (the tail is folded
+onto the start) or **WITH TAIL**. **STEMS .ZIP** renders one WAV per audible plate from
+the same plan, so the stems sum to the mix. The files are 24-bit / 48 kHz.
 
 ## Your own sounds
 

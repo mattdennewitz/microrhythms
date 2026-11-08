@@ -38,7 +38,6 @@
     keys: new Set(),
     tNow: 0,                      // clock time of the last update
     ap: { t0: 0, tau0: 0, speed: 1 },
-    cursor: null,                 // {t, pos}: pose used at the end of the last scheduled window
     stats: { sensor: 0 },
     near: null,                   // HUD info for the nearest plate in range
 
@@ -50,7 +49,13 @@
     // ------------------------------------------------------------ autopilot
     /** Closed-form path: ping-pong along the axis while swinging in radius and
      *  in angle around the read-head side of the plates. */
-    tau(t) { return this.ap.tau0 + this.ap.speed * (t - this.ap.t0); },
+    /** Path phase. The autopilot only cruises while the music plays: stopped, the
+     *  phase is frozen where playback stopped, and resumes from there on play. */
+    tau(t) {
+      if (this.paused()) return this.ap.tau0;
+      return this.ap.tau0 + this.ap.speed * (t - this.ap.t0);
+    },
+    paused() { return this.on && !MR.engine.playing; },
     PERIOD: 110,       // seconds for one ping-pong along the stack (at SPEED ×1)
     span() {
       const xs = MR.stack.plates.map((p) => MR.view.plateX(p));
@@ -121,6 +126,7 @@
       this.cursor = null;
       this.keys.clear();
       const t = this.clock();
+      this.pos = this.apPos(t); // on the path immediately, not at the default spot until the next frame
       this.fwdSmooth = this.pathHeading(t);
     },
     /** Heading along the path, with pitch flattened so turnarounds don't stare at the floor. */
@@ -241,12 +247,43 @@
 
     /** Gain for a fixed-head grain: 1 / (1 + (d / falloff)²), d = ship → where the
      *  grain sounds. With falloff 0.32: 0.2 u → 0.72, 0.75 u → 0.15, 2 u → 0.025. */
-    proximity(p, c, t, headAngle) {
-      const s = this.predict(t);
+    proximityAt(s, p, c, headAngle, falloff) {
       const X = MR.view.plateX(p);
       const d = Math.hypot(s[0] - X, s[1] - c.radius * Math.sin(headAngle), s[2] + c.radius * Math.cos(headAngle));
-      const q = d / this.falloff;
+      const q = d / falloff;
       return 1 / (1 + q * q);
+    },
+    proximity(p, c, t, headAngle) { return this.proximityAt(this.predict(t), p, c, headAngle, this.falloff); },
+
+    /** Live flight parameters for the engine. */
+    liveCtx() {
+      return { shipAt: (t) => this.predict(t), headMix: this.headMix, falloff: this.falloff, R: this.R,
+        sensorGain: this.sensorGain, useChance: this.useChance };
+    },
+
+    /** A frozen copy of the flight for an export starting at song beat `startBeat`.
+     *  Autopilot (while playing): the ship follows the same path in sync with the song,
+     *  so the render matches what you heard and will hear. Otherwise the ship stays
+     *  where it is now, facing where it faces now. */
+    exportCtx(startBeat) {
+      const E = MR.engine;
+      const bps = E.bpm / 60;
+      const base = { headMix: this.headMix, falloff: this.falloff, R: this.R, sensorGain: this.sensorGain, useChance: this.useChance };
+      if (this.autopilot && E.playing) {
+        const liveT = (tOff) => E.timeAtBeat(startBeat + tOff * bps);
+        const shipAt = (tOff) => this.apPos(liveT(tOff));
+        const poseAt = (tOff) => {
+          const t = liveT(tOff), a = this.apPos(t), b = this.apPos(t + 0.6);
+          let f = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
+          f = Math.hypot(f[0], f[1], f[2]) > 1e-5 ? norm(f) : this.fwdSmooth;
+          const right = norm(cross(f, [0, 1, 0]));
+          return { pos: a, fwd: f, up: cross(right, f) };
+        };
+        return Object.assign(base, { moving: true, shipAt, poseAt, where: 'along the autopilot path' });
+      }
+      const pose = this.pose();
+      const pos = pose.pos.slice();
+      return Object.assign(base, { moving: false, shipAt: () => pos, poseAt: () => ({ pos, fwd: pose.fwd, up: pose.up }), where: 'at the ship\'s position' });
     },
 
     /** Ship position expressed in a plate's plane. */
@@ -283,18 +320,19 @@
 
     // ------------------------------------------------------------ scheduling
     /** Called by the engine for every window [Ba, Bb) (after the fixed heads). */
-    schedule(E, Ba, Bb) {
-      if (!this.on || Bb <= Ba) return;
+    schedule(E, Ba, Bb, fc) {
+      if (!fc || Bb <= Ba) return;
       const ta = E.timeAtBeat(Ba), tb = E.timeAtBeat(Bb);
       // reuse the exact pose that ended the previous window so crossings at the
       // shared edge land in exactly one window
-      const posA = this.cursor && Math.abs(this.cursor.t - ta) < 1e-9 ? this.cursor.pos : this.predict(ta);
-      const posB = this.predict(tb);
-      this.cursor = { t: tb, pos: posB };
-      const R = this.R;
+      const cur = E.sensorCursor;
+      const posA = cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : fc.shipAt(ta);
+      const posB = fc.shipAt(tb);
+      E.sensorCursor = { t: tb, pos: posB };
+      const R = fc.R;
       const anySolo = MR.stack.anySolo();
       for (const p of MR.stack.plates) {
-        if (!p.audible(anySolo)) continue;
+        if (E.onlyPlate ? p !== E.onlyPlate : !p.audible(anySolo)) continue;
         const X = MR.view.plateX(p);
         const A = this.polar(posA, X), B = this.polar(posB, X);
         const minDx = A.dx * B.dx <= 0 ? 0 : Math.min(Math.abs(A.dx), Math.abs(B.dx));
@@ -327,9 +365,9 @@
         }
         hits.sort((x, y) => x.B - y.B);
         for (const h of hits) {
-          const gain = this.sensorGain * Math.pow(1 - h.d / R, 1.3);
+          const gain = fc.sensorGain * Math.pow(1 - h.d / R, 1.3);
           E.fire(p, h.c, E.timeAtBeat(h.B), h.th, h.B, gain, { sensor: true, dist: h.d });
-          this.stats.sensor++;
+          if (!E.offline) this.stats.sensor++;
         }
       }
     },
@@ -337,5 +375,10 @@
 
   // keep the sensor wrap helper available for tests / HUD
   flight.wrapPi = wrapPi;
+  // the window cursor lives on the engine (an export's offline engine keeps its own)
+  Object.defineProperty(flight, 'cursor', {
+    get() { return MR.engine.sensorCursor; },
+    set(v) { MR.engine.sensorCursor = v; },
+  });
   MR.flight = flight;
 })(window.MR);

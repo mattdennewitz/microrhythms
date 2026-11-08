@@ -178,7 +178,8 @@
       $('dock-fly').textContent = F.on ? '✈ LAND' : '✈ FLY';
       this.syncAutopilot();
       if (F.on) $('hud-hint').classList.add('gone');
-      this.toast(F.on ? 'flight — autopilot cruising · W/A/S/D to take the stick' : 'landed');
+      this.toast(!F.on ? 'landed' : MR.engine.playing ? 'flight — autopilot cruising · W/A/S/D to take the stick'
+        : 'flight — autopilot cruises when you press play · W/A/S/D to fly now');
     },
     toggleAutopilot() {
       const F = MR.flight;
@@ -190,7 +191,7 @@
       for (const id of ['btn-autopilot', 'dock-auto']) {
         const b = $(id);
         b.classList.toggle('on', MR.flight.autopilot);
-        b.textContent = MR.flight.autopilot ? 'AUTOPILOT' : 'MANUAL';
+        b.textContent = !MR.flight.autopilot ? 'MANUAL' : MR.flight.paused() ? 'AUTOPILOT ❚❚' : 'AUTOPILOT';
       }
     },
 
@@ -487,19 +488,19 @@
         status.textContent = 'rendering mix…';
         try {
           const r = await X.exportWav();
-          if (r) status.textContent = `saved ${r.name}`;
+          if (r) status.textContent = `saved ${r.name} · ${r.from}`;
         } catch (err) { status.textContent = `render failed: ${err.message}`; console.error(err); }
       });
       $('btn-export-stems').addEventListener('click', async () => {
         try {
           const r = await X.exportStems({ onProgress: (i, n, name) => { status.textContent = `rendering stem ${i + 1}/${n} · ${name}…`; } });
-          if (r) status.textContent = `saved ${r.name} · ${r.files.length} stems`;
+          if (r) status.textContent = `saved ${r.name} · ${r.files.length} stems · ${r.from}`;
         } catch (err) { status.textContent = `render failed: ${err.message}`; console.error(err); }
       });
     },
     syncExport() {
       const X = MR.exporter;
-      $('export-status').textContent = `${X.phrases * MR.stack.phraseBars} bars · ${X.seconds().toFixed(1)} s from bar 1 · 24-bit 48 kHz`;
+      $('export-status').textContent = `${X.phrases * MR.stack.phraseBars} bars · ${X.seconds().toFixed(1)} s from the current phrase (bar 1 when stopped) · 24-bit 48 kHz`;
     },
 
     // ------------------------------------------------------------ meters
@@ -563,6 +564,7 @@
       $('btn-play').textContent = E.playing ? '■ STOP' : '▶ PLAY';
       $('btn-play').classList.toggle('on', E.playing);
       if (E.playing) $('hud-hint').classList.add('gone');
+      this.syncAutopilot(); // autopilot pauses/resumes with playback
       this.afterSwitch();
     },
 
@@ -866,7 +868,7 @@
         const n = F.near;
         const P = F.polar(F.pos, 0);
         rows = [
-          `<span class="k">FLIGHT</span> <span class="big">${F.autopilot ? 'AUTOPILOT' : 'MANUAL'}</span>`,
+          `<span class="k">FLIGHT</span> <span class="big">${!F.autopilot ? 'MANUAL' : F.paused() ? 'AUTOPILOT · PAUSED' : 'AUTOPILOT'}</span>`,
           `<span class="k">SPD</span> ${F.speed().toFixed(2)} U/S <span class="k">SENSOR</span> ${F.R.toFixed(2)} U`,
           `<span class="k">X</span> ${signed(F.pos[0], 2)} <span class="k">R</span> ${P.r.toFixed(2)} <span class="k">θ</span> ${(mod(P.th, TAU) * 180 / Math.PI).toFixed(1)}°`,
           n ? `<span class="k">NEAR</span> <span class="big">${n.plate.name}</span> <span class="k">ΔX</span> ${signed(n.dx, 2)}${n.inside ? ' · IN FIELD' : ''}` : `<span class="k">NEAR</span> —`,
