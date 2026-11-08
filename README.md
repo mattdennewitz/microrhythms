@@ -5,9 +5,9 @@ chip on a plate is a fragment of a sound. When a chip's rotating angle crosses t
 plate's fixed **read head** (the shaded wedge at ~3 o'clock), its fragment plays,
 from where it sits in the stack.
 
-Live at <https://microrhythms.dennewitz.computer>, or open `public/index.html`
-directly in a browser (no build, no server, no network needed — the IBM Plex Mono
-webfont is optional). Press **space** or **▶ PLAY**.
+Live at <https://microrhythms.dennewitz.computer>, or run it locally with
+`npm install && npm run dev` (see [Developing](#developing)). It needs no network
+once loaded — the IBM Plex Mono webfont is optional. Press **space** or **▶ PLAY**.
 
 ## How it works
 
@@ -172,33 +172,64 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 
 ## Files
 
+TypeScript, built with Vite. The machine (`src/core`) is plain TypeScript with no UI
+dependency; the panel, HUD and input handling (`src/ui`) are React.
+
 ```
-public/index.html        layout
-public/css/style.css     HUD + panel styling
-public/js/util.js        PRNG, euclidean rhythm, scale quantiser
-public/js/stack.js       plates, chips, styles, breaks, FX, cut modes, snapshots
-public/js/sounds.js      synthesized built-ins, sample library, decoding, onsets
-public/js/engine.js      beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
-public/js/history.js     undo / redo snapshots
-public/js/export.js      WAV encoder, ZIP writer, loop folding, export actions
-public/js/project.js     save / open the whole machine as JSON
-public/js/render.js      perspective camera + Canvas2D line-art, picking
-public/js/ui.js          panel, HUD readouts, meters, pointer/keyboard
-public/js/main.js        boot + frame loop (exposes window.MR_DEBUG)
+index.html                Vite entry
+src/main.tsx              boot: build the machine, mount React (exposes window.MR_DEBUG)
+src/styles.css            HUD + panel styling
+src/core/util.ts          PRNG, euclidean rhythm, scale quantiser
+src/core/types.ts         shared shapes: Sound, Chip, FX, motion, pose
+src/core/stack.ts         plates, chips, styles, breaks, FX, cut modes, snapshots
+src/core/sounds.ts        synthesized built-ins, sample library, decoding, onsets
+src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
+src/core/history.ts       undo / redo snapshots
+src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
+src/core/project.ts       save / open the whole machine as JSON
+src/core/flight.ts        flight mode: ship, autopilot path, sensor read head
+src/core/view.ts          perspective camera + Canvas2D line-art, picking
+src/core/bridge.ts        the few things the core asks of the UI (panel width, keep slots, sync)
+src/app/controller.ts     every UI action and the UI's own state (keep slots, toasts, shortcuts)
+src/app/store.ts          change notifications for React + per-frame callbacks
+src/app/loop.ts           the frame loop: events → flashes, camera, listener, draw, HUD
+src/ui/App.tsx            page layout, flight dock, toast, live region, file drop
+src/ui/Panel.tsx          the side panel: transport, flight, compose, layer, output, handling
+src/ui/Sounds.tsx         sound list, sample pool, fragment map
+src/ui/Hud.tsx            HUD readouts and meters (written per frame, outside React renders)
+src/ui/Stage.tsx          stack canvas: orbit, zoom, picking, keyboard cell cursor
+src/ui/keys.ts            window shortcuts and flight keys
+src/ui/controls.tsx       slider, segmented row, toggle, tap / long-press
 ```
 
-## Deploying
+The core keeps its state in mutable singletons. UI actions change that state and call
+`notify()`; components re-read what they show. Anything that changes every frame
+(HUD text, meters, the fragment map) is drawn from the frame loop through refs, so
+React never re-renders at 60 fps. In development builds every core module is also on
+`window.MR` for poking at from the console.
 
-The site is plain static files in `public/`, served by a Cloudflare Worker (static
-assets only, no Worker script) on the custom domain
-`microrhythms.dennewitz.computer`. Config lives in `cloudflare.config.ts` (Worker
-name, account, domain) and `wrangler.config.ts` (assets directory), and deploys
-with Cloudflare's `cf` CLI:
+## Developing
 
 ```
 npm install
-npm run dev      # local preview
-npm run deploy   # cf deploy → production
+npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
+npm run typecheck  # tsc
+npm run build      # typecheck + production build into .cloudflare/output
+npm run preview    # serve the production build locally
+```
+
+Because the code is ES modules, the page has to be served — opening `index.html`
+from disk (`file://`) no longer works.
+
+## Deploying
+
+The production build is static files served by a Cloudflare Worker (static assets
+only, no Worker script) on the custom domain `microrhythms.dennewitz.computer`.
+`cloudflare.config.ts` holds the Worker name, account and domain; the Cloudflare
+Vite plugin (v2) reads it, and Cloudflare's `cf` CLI builds and deploys:
+
+```
+npm run deploy     # typecheck, then cf deploy → production
 ```
 
 `cf` must be signed in to the account that owns the `dennewitz.computer` zone
