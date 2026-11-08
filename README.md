@@ -131,21 +131,41 @@ including patterns and edits, keep slots, custom sounds (the same 16-bit PCM as
 JSON files), flight settings, export settings and the deterministic chance seed.
 Playback does not start automatically. Links and project files use the same
 validated payload: `format: "orbital-stack"` and a **required integer `version: 1`**.
-Existing version-1 project exports remain supported; missing, malformed or
-unsupported versions are rejected before changing the machine.
+Existing version-1 project exports remain supported within the safety budgets below;
+missing, malformed or unsupported versions are rejected before changing the machine.
+Inert out-of-range cells in older files are discarded on import. Custom sound IDs
+are preserved so random cut modes and exported fragments do not change on reopen.
 
 The URL hash updates at most every 500 ms using `history.replaceState`, without
 adding browser history entries. Share captures the setup at the click, including
-edits not yet written to the address bar. Hashes use `#mr1.` followed by gzip JSON
-encoded as base64url; no backend or upload is involved. Invalid or unsupported
-links load the default setup and display an explanation.
+edits not yet written to the address bar. Hashes use
+`#mr2.<sha256-checksum>.<gzip-project>` with unpadded base64url components;
+no backend, R2, D1 or upload is involved. The checksum is checked before
+decompression. Broken, unsupported, oversized or schema-invalid links are rejected:
+the invalid hash is removed, an error is shown, and the current setup and playback
+are left unchanged. On initial load this leaves the untouched default setup.
+Older `#mr1.` share envelopes are not accepted; version-1 JSON files still import.
 
-Share payloads are limited to 8 MiB of uncompressed JSON and a 2 MiB hash.
-Large recordings can exceed these limits, and messaging apps may impose much
-shorter URL limits; use **SAVE .JSON / OPEN .JSON** for those projects. Sounds are
-never silently omitted. Anyone with a link can read its settings and embedded
-audio. If clipboard access is unavailable or denied, copy the address-bar URL
-after it updates.
+The **entire URL** is limited to 16 KiB, with at most 1 MiB of decompressed JSON.
+Project imports and native sound additions are limited to 64 user sounds and
+8,640,000 total mono sample frames (180 seconds at 48 kHz), at most 90 seconds per
+sound. Names are bounded to 128 characters without invisible control characters.
+JSON project files have a 24 MiB input limit. Larger or less-compressible audio
+setups need **SAVE .JSON / OPEN .JSON** rather than a link. Sounds are never silently
+omitted, and messaging apps may impose shorter URL limits.
+
+Every accepted record uses an explicit schema: unknown/prototype fields, extra
+array properties, invalid types, nonfinite numbers and malformed PCM are rejected
+before state changes or native audio allocation. Imported labels are rendered only
+as text, never interpreted as HTML. Production assets also carry a Content Security
+Policy that blocks inline scripts, event handlers, objects and framing.
+
+**Integrity is not authenticity.** The checksum detects corruption, but anyone can
+construct another valid project and recompute it. A backend-free link cannot prove
+its author or prevent valid edits. It is not encrypted: anyone with the link can
+read the settings and embedded audio, which also appear in browser URL/history
+surfaces during automatic synchronization. If clipboard access is unavailable or
+denied, copy the address-bar URL after it updates.
 
 ## Your own sounds
 
@@ -209,6 +229,7 @@ src/core/history.ts       undo / redo snapshots
 src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
 src/core/project.ts       versioned save / open the whole machine as JSON
 src/core/project-format.ts shared validation for project files and share links
+src/core/project-limits.ts shared native/import sound and processing budgets
 src/core/share-codec.ts   bounded gzip / base64url state links
 src/app/sharing.ts       hash restoration, throttled synchronization and clipboard
 src/core/flight.ts        flight mode: ship, autopilot path, sensor read head

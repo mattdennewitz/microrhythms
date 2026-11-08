@@ -4,9 +4,12 @@ import { mulberry32 } from './util';
 import { stack, type Plate } from './stack';
 import { engine } from './engine';
 import type { Sound } from './types';
+import {
+  BUILTIN_NAMES, MAX_USER_SOUNDS, MAX_USER_SAMPLES, MAX_SOUND_SECONDS, MAX_SOUND_NAME,
+  MAX_SOUND_ID, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE, validSoundName,
+} from './project-limits';
 
 const SR = 48000;
-const MAX_SECONDS = 90;
 
 function makeBuffer(data: Float32Array<ArrayBuffer>, sr = SR): AudioBuffer {
   const buf = new AudioBuffer({ length: data.length, numberOfChannels: 1, sampleRate: sr });
@@ -247,7 +250,7 @@ function detectOnsets(buffer: AudioBuffer): number[] {
 /** Mono-ise, trim silence, cap length, normalise. */
 function condition(buffer: AudioBuffer): AudioBuffer {
   const ch = buffer.numberOfChannels;
-  const len = Math.min(buffer.length, Math.floor(buffer.sampleRate * MAX_SECONDS));
+  const len = Math.min(buffer.length, Math.floor(buffer.sampleRate * MAX_SOUND_SECONDS));
   const mono = new Float32Array(len);
   for (let c = 0; c < ch; c++) {
     const d = buffer.getChannelData(c);
@@ -271,6 +274,19 @@ function condition(buffer: AudioBuffer): AudioBuffer {
   return makeBuffer(trimmed, buffer.sampleRate);
 }
 
+function userCapacity(list: readonly Sound[], frames: number, sampleRate: number): void {
+  if (!Number.isFinite(sampleRate) || sampleRate < MIN_SAMPLE_RATE || sampleRate > MAX_SAMPLE_RATE
+    || !Number.isSafeInteger(frames) || frames < 1 || frames > sampleRate * MAX_SOUND_SECONDS) {
+    throw new Error('sound must contain nonempty audio of at most 90 seconds at a supported sample rate');
+  }
+  let count = 0, samples = frames;
+  for (const sound of list) {
+    if (!sound.builtin) { count++; samples += sound.buffer.length; }
+  }
+  if (count >= MAX_USER_SOUNDS) throw new Error(`at most ${MAX_USER_SOUNDS} user sounds are supported`);
+  if (samples > MAX_USER_SAMPLES) throw new Error(`user sounds exceed the ${MAX_USER_SAMPLES} sample-frame limit`);
+}
+
 export const sounds = {
   list: [] as Sound[],
   nextId: 1,
@@ -292,10 +308,22 @@ export const sounds = {
   byName(name: string): Sound | undefined { return this.list.find((s) => s.name === name); },
   get(id: number): Sound | undefined { return this.list.find((s) => s.id === id); },
 
-  add(name: string, buffer: AudioBuffer, builtin = false, emit = true): Sound {
+  add(name: string, buffer: AudioBuffer, builtin = false, emit = true, savedId?: number): Sound {
+    if (!validSoundName(name)) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
+    if (builtin) {
+      if (!(BUILTIN_NAMES as readonly string[]).includes(name) || this.byName(name)) throw new Error('invalid or duplicate builtin sound');
+    } else userCapacity(this.list, buffer.length, buffer.sampleRate);
     let nm = name, k = 2;
-    while (this.byName(nm)) nm = `${name} ${k++}`;
-    const snd: Sound = { id: this.nextId++, name: nm, buffer, builtin, enabled: true, peaks: peaks(buffer), onsets: detectOnsets(buffer) };
+    while (this.byName(nm) || (!builtin && (BUILTIN_NAMES as readonly string[]).includes(nm))) {
+      const suffix = ` ${k++}`;
+      nm = `${name.slice(0, MAX_SOUND_NAME - suffix.length)}${suffix}`;
+    }
+    let id = savedId ?? this.nextId;
+    if (savedId === undefined) while (this.get(id) && id <= MAX_SOUND_ID) id++;
+    if (!Number.isSafeInteger(id) || id < 1 || id > MAX_SOUND_ID || this.get(id)) throw new Error('invalid or duplicate sound id');
+    const overview = peaks(buffer), onsets = detectOnsets(buffer);
+    const snd: Sound = { id, name: nm, buffer, builtin, enabled: true, peaks: overview, onsets };
+    if (savedId === undefined) this.nextId = id + 1;
     this.list.push(snd);
     if (emit) this.emit();
     return snd;
@@ -303,6 +331,9 @@ export const sounds = {
 
   /** Add a user sound and feed it to every plate (rhythms are preserved). */
   addUser(name: string, buffer: AudioBuffer): Sound {
+    if (!validSoundName(name)) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
+    // Reject over-budget additions before mono/trim, peaks or onset allocations.
+    userCapacity(this.list, Math.min(buffer.length, Math.floor(buffer.sampleRate * MAX_SOUND_SECONDS)), buffer.sampleRate);
     const snd = this.add(name, condition(buffer));
     stack.plates.forEach((p) => p.sourceIds.add(snd.id));
     this.emit();

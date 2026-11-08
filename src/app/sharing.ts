@@ -1,6 +1,6 @@
 /* Share the same versioned state as project files, without a server. */
 import { project } from '../core/project';
-import { encodeShare, decodeShare } from '../core/share-codec';
+import { encodeShare, decodeShare, MAX_SHARE_URL_LENGTH } from '../core/share-codec';
 import { flight } from '../core/flight';
 import { subscribe } from './store';
 
@@ -10,22 +10,38 @@ let generation = 0;
 let lastJson = '';
 let report: (message: string) => void;
 let restoring = false;
+let restoreAbort: AbortController | undefined;
+let syncBusy = false;
+
+function baseUrl(): URL {
+  const url = new URL(location.href);
+  url.hash = '';
+  return url;
+}
 
 function replaceHash(hash: string) {
-  const url = new URL(location.href);
+  const url = baseUrl();
   url.hash = hash;
+  if (hash && url.href.length > MAX_SHARE_URL_LENGTH) throw new Error('Share URL is too large; use project file export instead.');
   window.history.replaceState(window.history.state, '', url);
   return url.href;
 }
 
 async function sync() {
   timer = undefined;
+  if (restoring) return;
+  if (syncBusy) {
+    timer = window.setTimeout(() => { void sync(); }, THROTTLE_MS);
+    return;
+  }
+  syncBusy = true;
   const current = generation;
-  const snapshot = project.serialize();
-  const json = JSON.stringify(snapshot);
-  if (json === lastJson) return;
+  let json = '';
   try {
-    const hash = await encodeShare(snapshot);
+    const snapshot = project.serialize();
+    json = JSON.stringify(snapshot);
+    if (json === lastJson) return;
+    const hash = await encodeShare(snapshot, MAX_SHARE_URL_LENGTH - baseUrl().href.length);
     if (current !== generation) return;
     replaceHash(hash);
     lastJson = json;
@@ -35,6 +51,8 @@ async function sync() {
     replaceHash('');
     lastJson = json;
     report(`URL not updated: ${(err as Error).message}`);
+  } finally {
+    syncBusy = false;
   }
 }
 
@@ -48,36 +66,52 @@ export const sharing = {
   /** Restore before mounting React or starting animation/audio. */
   async init(onMessage: (message: string) => void) {
     report = onMessage;
-    const defaults = project.serialize();
     const restore = async () => {
+      restoreAbort?.abort();
+      const controller = new AbortController();
+      restoreAbort = controller;
       const current = ++generation;
       restoring = true;
       clearTimeout(timer);
       timer = undefined;
       const hash = location.hash;
+      let shouldSync = false;
       try {
-        const saved = hash ? await decodeShare(hash) : defaults;
-        if (current !== generation) return;
+        if (!hash) {
+          lastJson = '';
+          shouldSync = true;
+          return;
+        }
+        const saved = await decodeShare(hash, MAX_SHARE_URL_LENGTH - baseUrl().href.length, controller.signal);
+        if (current !== generation || location.hash !== hash) return;
         project.apply(saved);
         lastJson = '';
-        if (hash) report('shared setup loaded — press play');
+        shouldSync = true;
+        report('shared setup loaded — press play');
       } catch (err) {
-        if (current !== generation) return;
-        // Decode/validation completes before apply, so bad links never partially load.
-        project.apply(defaults);
+        if (current !== generation || controller.signal.aborted) return;
+        // A rejected link never replaces the current setup, playback or sounds.
+        replaceHash('');
         lastJson = '';
-        report(`could not load share link: ${(err as Error).message} — using defaults`);
+        report(`share link rejected: ${(err as Error).message} — current setup unchanged`);
+      } finally {
+        if (current === generation) {
+          restoring = false;
+          restoreAbort = undefined;
+          if (shouldSync) schedule();
+        }
       }
-      restoring = false;
-      schedule();
     };
-    await restore();
     const unsubscribe = subscribe(schedule);
     window.addEventListener('hashchange', restore);
     // Flight position changes outside React's notification stream.
     const flightTimer = setInterval(() => { if (flight.on) schedule(); }, THROTTLE_MS);
+    await restore();
     return () => {
       generation++;
+      restoreAbort?.abort();
+      restoreAbort = undefined;
+      restoring = false;
       clearTimeout(timer);
       timer = undefined;
       clearInterval(flightTimer);
@@ -91,8 +125,8 @@ export const sharing = {
     const current = ++generation;
     const snapshot = project.serialize();
     const json = JSON.stringify(snapshot);
-    const hash = await encodeShare(snapshot);
-    const url = new URL(location.href);
+    const url = baseUrl();
+    const hash = await encodeShare(snapshot, MAX_SHARE_URL_LENGTH - url.href.length);
     url.hash = hash;
     if (current === generation) {
       replaceHash(hash);

@@ -208,6 +208,9 @@ export const app = {
   // ---------------------------------------------------------------- layer
   select(i: number) {
     stack.selected = mod(i, stack.plates.length);
+    this.cell.track = clamp(this.cell.track, 0, stack.sel.tracks - 1);
+    this.cell.sector = mod(this.cell.sector, stack.sel.steps);
+    if (view.cursorCell) this.syncCell(false);
     notify();
   },
   toggleHold() {

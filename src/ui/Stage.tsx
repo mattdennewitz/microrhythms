@@ -103,6 +103,7 @@ export function Stage() {
       else if (e.key === 'PageUp') { app.select(stack.selected + 1); app.syncCell(true); }
       else if (e.key === 'PageDown') { app.select(stack.selected - 1); app.syncCell(true); }
       else if (e.key === 'Enter') {
+        app.syncCell(false); // Global layer shortcuts may have changed the plate.
         const p = stack.sel;
         const chip = p.chips.find((x) => x.key === c.track * p.steps + c.sector);
         if (e.shiftKey) {

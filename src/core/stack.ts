@@ -347,8 +347,9 @@ export class Plate {
   serialize(): PlateSnapshot {
     const o: Record<string, unknown> = {};
     for (const k of SNAP_KEYS) o[k] = this[k];
-    o.overrides = [...this.overrides];
-    o.fxOverrides = [...this.fxOverrides];
+    const count = this.steps * this.tracks;
+    o.overrides = [...this.overrides].filter(([key]) => key >= 0 && key < count);
+    o.fxOverrides = [...this.fxOverrides].filter(([key]) => key >= 0 && key < count);
     o.sourceIds = [...this.sourceIds];
     return o as PlateSnapshot;
   }

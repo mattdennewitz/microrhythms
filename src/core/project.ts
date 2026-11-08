@@ -2,7 +2,8 @@
  *
  * Includes global, view, flight and export settings, every plate (and holds),
  * the keep slots, the chance seed (so a reopened project exports the same hits)
- * and your own sounds, embedded as 16-bit PCM. Sound ids are remapped on open.
+ * and your own sounds, embedded as 16-bit PCM. Builtin ids remap by name;
+ * user ids stay stable because random cut modes depend on their identity.
  */
 import { stack, type StackSnapshot, type StyleName } from './stack';
 import { engine } from './engine';
@@ -73,7 +74,19 @@ function decodePcm(b64: string): Float32Array<ArrayBuffer> {
   for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32767;
   return f32;
 }
-const remapSnap = (snap: StackSnapshot, idMap: Map<number, number>): StackSnapshot => snap.map((o) => Object.assign({}, o, { sourceIds: (o.sourceIds || []).map((id) => idMap.get(id)).filter((id) => id != null) }));
+function copySnapshot(snap: StackSnapshot, idMap?: Map<number, number>): StackSnapshot {
+  return snap.map((o): StackSnapshot[number] => {
+    const count = o.steps! * o.tracks!;
+    return {
+      ...o,
+      overrides: (o.overrides || []).filter(([key]) => key >= 0 && key < count).map(([key, on]) => [key, on]),
+      fxOverrides: (o.fxOverrides || []).filter(([key]) => key >= 0 && key < count).map(([key, fx]) => [key, fx]),
+      sourceIds: idMap
+        ? (o.sourceIds || []).map((id) => idMap.get(id)).filter((id): id is number => id !== undefined)
+        : (o.sourceIds || []).slice(),
+    };
+  });
+}
 
 export const project = {
   serialize(): ProjectFile {
@@ -90,7 +103,7 @@ export const project = {
       view: { sepTarget: V.sepTarget, mode: V.mode, autoOrbit: V.autoOrbit, dragYaw: V.dragYaw, dragPitch: V.dragPitch, zoom: V.zoom },
       plates: S.snapshot(),
       holds: S.plates.map((p) => p.hold),
-      keep: { slots: U.slots.map((s) => (s ? JSON.parse(JSON.stringify(s)) : null)), active: U.activeSlot },
+      keep: { slots: U.slots.map((s) => s ? copySnapshot(s) : null), active: U.activeSlot },
       sounds: {
         builtins: Object.fromEntries(soundList.filter((s) => s.builtin).map((s) => [s.name, s.enabled])),
         builtinIds: soundList.filter((s) => s.builtin).map((s) => [s.id, s.name]),
@@ -122,6 +135,7 @@ export const project = {
   },
 
   async open(file: File): Promise<ProjectFile> {
+    if (file.size > 24 * 1024 * 1024) throw new Error('project file exceeds the 24 MiB safety limit');
     const text = await file.text();
     let obj: unknown;
     try { obj = JSON.parse(text); } catch { throw new Error('not a JSON file'); }
@@ -132,6 +146,8 @@ export const project = {
   /** Validate completely before replacing the current machine or stopping playback. */
   apply(obj: unknown) {
     validateProject(obj);
+    const builtinIds = new Set(sounds.list.filter((s) => s.builtin).map((s) => s.id));
+    if (obj.sounds.user.some((sound) => builtinIds.has(sound.id))) throw new Error('invalid project: user sound id collides with a builtin');
     // Native buffer creation can reject rates unsupported by a particular browser.
     // Stage it before stopping playback, removing sounds or changing any state.
     const userSounds = obj.sounds.user.map((u) => ({
@@ -152,7 +168,7 @@ export const project = {
     for (const [id, name] of savedBuiltinIds) { const b = builtinByName.get(name); if (b) idMap.set(id, b.id); }
     for (const [name, on] of Object.entries(obj.sounds.builtins)) { const b = builtinByName.get(name); if (b) b.enabled = on; }
     for (const { sound: u, buffer } of userSounds) {
-      const snd = sounds.add(u.name, buffer, false, false);
+      const snd = sounds.add(u.name, buffer, false, false, u.id);
       snd.enabled = u.enabled;
       idMap.set(u.id, snd.id);
     }
@@ -174,11 +190,11 @@ export const project = {
     S.fxTypes = g.fxTypes.slice();
 
     // plates, holds, keep slots (sound ids remapped)
-    S.restore(remapSnap(obj.plates, idMap));
+    S.restore(copySnapshot(obj.plates, idMap));
     obj.holds.forEach((h, i) => { S.plates[i].hold = h; });
     S.plates.forEach((p) => p.assignFx());
     S.selected = g.selected;
-    U.slots = obj.keep.slots.map((slot) => slot === null ? null : remapSnap(slot, idMap));
+    U.slots = obj.keep.slots.map((slot) => slot === null ? null : copySnapshot(slot, idMap));
     U.activeSlot = obj.keep.active;
 
     // view
