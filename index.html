@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbital Stack</title>
+  <meta name="description" content="A Web Audio micro-rhythm machine: spinning plates of sound fragments, layered in space.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="stage" aria-label="Orbital stack of rotating sound plates"></canvas>
+
+  <!-- HUD overlay -->
+  <div id="hud" aria-hidden="false">
+    <div class="hud-tl">
+      <div class="hud-brand">MICRO <span class="sep">·</span> RHYTHM</div>
+      <div class="hud-sub">◦ GEN <span class="sep">·</span> ORBITAL STACK <span class="sep">·</span> VIEW <span id="hud-view">07</span></div>
+      <div class="hud-mode" id="hud-mode">ORBIT</div>
+      <div class="hud-stats" id="hud-stats">SEP 100% LYR 07 FRM 000000</div>
+    </div>
+    <div class="hud-tr" id="hud-tr"></div>
+    <div class="hud-bl" id="meters"></div>
+    <div class="hud-hint" id="hud-hint">SPACE / ▶ TO SPIN THE STACK · DROP AUDIO ANYWHERE TO SAMPLE IT</div>
+  </div>
+
+  <button id="panel-toggle" class="ghost" title="Toggle panel (P)">≡ PANEL</button>
+
+  <aside id="panel">
+    <section class="block">
+      <header>TRANSPORT</header>
+      <div class="row">
+        <button id="btn-play" class="primary">▶ PLAY</button>
+        <button id="btn-mode" title="Toggle ORBIT / SPLIT (S)">SPLIT</button>
+        <button id="btn-orbit" class="on" title="Auto-orbit the camera (O)">AUTO-ORBIT</button>
+      </div>
+      <div id="transport-sliders"></div>
+      <div class="row">
+        <button id="btn-ear" class="on" title="Where you listen from">EAR: CAMERA</button>
+        <button id="btn-pan" title="Spatialisation model">PAN: HRTF</button>
+      </div>
+    </section>
+
+    <section class="block">
+      <header>COMPOSE <span class="dim" id="pos-readout"></span></header>
+      <div class="row">
+        <button id="btn-new-phrase" class="primary" title="Draw a new phrase for every plate not on hold (N). Shift-click or hold: at the next phrase line.">NEW PHRASE</button>
+        <select id="style-select" title="Direction of the next draw"></select>
+      </div>
+      <div class="row keeps" id="keep-row">
+        <button id="btn-keep" title="Keep the phrase you hear in the next free slot (K)">KEEP</button>
+      </div>
+      <p class="hint">slot: tap = switch at next bar · hold = at next phrase · × releases</p>
+      <div id="compose-sliders"></div>
+      <div class="row">
+        <button id="btn-undo" title="Undo (⌘/Ctrl-Z)">↶ UNDO</button>
+        <button id="btn-redo" title="Redo (⇧⌘/Ctrl-Z)">↷ REDO</button>
+        <button id="btn-regen-all" title="New patterns and fragments for every plate not on hold (Shift+R)">REGEN ALL</button>
+      </div>
+      <div class="sub-head">CHIP FX</div>
+      <div class="row" id="fx-row">
+        <button id="btn-fx" class="on" title="All chip FX on/off">FX ON</button>
+      </div>
+    </section>
+
+    <section class="block" id="layer-block">
+      <header>
+        <button class="ghost tiny" id="sel-prev" aria-label="Previous layer">◀</button>
+        <span id="sel-name">LAYER</span>
+        <button class="ghost tiny" id="sel-next" aria-label="Next layer">▶</button>
+      </header>
+      <div class="row">
+        <button id="btn-hold" title="Keep this plate through new phrases and regeneration (H)">○ HOLD</button>
+        <button id="btn-mute" title="Mute (M)">MUTE</button>
+        <button id="btn-solo" title="Solo">SOLO</button>
+        <button id="btn-dir" title="Spin direction">DIR ↻</button>
+        <button id="btn-regen" title="New pattern & fragments for this plate (R)">REGEN</button>
+        <button id="btn-mutate" title="New structure for this plate in the current style">DRAW</button>
+      </div>
+      <div class="sub-head">RHYTHM</div>
+      <div id="layer-sliders"></div>
+      <div class="sub-head">FRAGMENTS</div>
+      <div class="row seg" id="cut-row"></div>
+      <div id="frag-sliders"></div>
+      <div class="row"><button id="btn-choke" title="Each new grain cuts the previous one on this plate">CHOKE</button></div>
+      <div class="sub-head">MAP <span class="dim">— every chip's fragment, flashing as it plays</span></div>
+      <canvas id="map" class="map" height="150"></canvas>
+      <div class="pool-head">SAMPLES FROM <span class="dim">(none selected = all)</span></div>
+      <div id="pool" class="pool"></div>
+    </section>
+
+    <section class="block">
+      <header>SOUNDS <span class="dim" id="snd-count"></span></header>
+      <label id="dropzone" class="dropzone" tabindex="0">
+        <input type="file" id="file-input" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.aif,.aiff" multiple>
+        <span>＋ ADD SOUNDS</span>
+        <small>click or drop audio files · they feed every plate</small>
+      </label>
+      <div class="row">
+        <button id="btn-mic" title="Record from microphone (max 20 s)">● REC MIC</button>
+        <button id="btn-resample" title="Capture 4 s of the machine itself as a new sound">⟲ RESAMPLE 4s</button>
+        <button id="btn-builtins" class="on" title="Enable / disable synthesized sources">BUILT-INS</button>
+      </div>
+      <ul id="sound-list" class="sound-list"></ul>
+    </section>
+
+    <section class="block">
+      <header>OUTPUT</header>
+      <div class="row seg" id="len-row"></div>
+      <div class="row seg" id="loop-row"></div>
+      <div class="row">
+        <button id="btn-export-wav" title="Render the mix from bar 1 (offline, seeded)">⤓ EXPORT WAV</button>
+        <button id="btn-export-stems" title="One WAV per audible plate, zipped">⤓ STEMS .ZIP</button>
+      </div>
+      <p class="hint" id="export-status">renders from bar 1 with the current stack · 24-bit 48 kHz</p>
+    </section>
+
+    <section class="block help">
+      <header>HANDLING</header>
+      <p>Drag to orbit · wheel to zoom · click a plate to select · <b>shift-click</b> a cell to add/remove a chip · <b>alt-click</b> a chip to cycle its FX · hover a chip to inspect its fragment.</p>
+      <p>Keys: <b>space</b> play · <b>N</b> new phrase (<b>⇧N</b> at phrase end) · <b>K</b> keep · <b>⌘Z</b> undo · <b>H</b> hold · <b>S</b> split · <b>O</b> orbit · <b>R</b> regen · <b>M</b> mute · <b>1–7</b> select · <b>P</b> panel</p>
+    </section>
+  </aside>
+
+  <div id="drop-veil"><div>DROP AUDIO TO SAMPLE</div></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/util.js"></script>
+  <script src="js/stack.js"></script>
+  <script src="js/sounds.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/export.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
