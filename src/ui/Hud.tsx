@@ -11,54 +11,99 @@ import { TAU, mod, pad, signed } from '../core/util';
 import { app } from '../app/controller';
 import { onFrame, useRevision } from '../app/store';
 
-const htmlCache = new Map<string, string>();
-/** Set an element's HTML only when it changed (per-frame readouts). */
-function setHTML(id: string, html: string) {
-  if (htmlCache.get(id) === html) return;
-  const el = document.getElementById(id);
-  if (!el) return;
-  htmlCache.set(id, html);
-  el.innerHTML = html;
+type ReadoutPart = string | { kind: 'k' | 'big' | 'bold'; text: string };
+type ReadoutRow = ReadoutPart[];
+type ReadoutKind = 'text' | 'break' | 'k' | 'big' | 'bold';
+type ReadoutCell = { kind: ReadoutKind; text: string; node: Node };
+type ReadoutCache = Map<string, { element: HTMLElement; cells: ReadoutCell[] }>;
+
+const k = (text: string): ReadoutPart => ({ kind: 'k', text });
+const big = (text: string): ReadoutPart => ({ kind: 'big', text });
+const bold = (text: string): ReadoutPart => ({ kind: 'bold', text });
+
+/** Reuse fixed formatting nodes and write changed values only as literal text. */
+function writeReadout(cache: ReadoutCache, id: string, rows: ReadoutRow[]) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  let entry = cache.get(id);
+  if (!entry || entry.element !== element) {
+    element.replaceChildren();
+    entry = { element, cells: [] };
+    cache.set(id, entry);
+  }
+  const cells = entry.cells;
+  let index = 0;
+  const write = (kind: ReadoutKind, text: string) => {
+    let cell = cells[index];
+    if (!cell || cell.kind !== kind) {
+      const node = kind === 'text' ? document.createTextNode('')
+        : kind === 'break' ? document.createElement('br')
+        : kind === 'bold' ? document.createElement('b')
+        : document.createElement('span');
+      if (kind === 'k' || kind === 'big') (node as HTMLElement).className = kind;
+      if (cell) element.replaceChild(node, cell.node);
+      else element.appendChild(node);
+      cell = cells[index] = { kind, text: '', node };
+    }
+    if (cell.text !== text) {
+      cell.node.textContent = text;
+      cell.text = text;
+    }
+    index++;
+  };
+  rows.forEach((row, i) => {
+    if (i) write('break', '');
+    row.forEach((part) => {
+      if (typeof part === 'string') write('text', part);
+      else write(part.kind, part.text);
+    });
+  });
+  while (cells.length > index) element.removeChild(cells.pop()!.node);
 }
 
-function hudFrame(tv: number) {
+function hudFrame(tv: number, cache: ReadoutCache) {
   const V = view, E = engine, S = stack;
   const B = E.songBeat(tv);
   const bar = Math.floor(B / 4), beat = Math.floor(B % 4) + 1;
   const inPh = (bar % S.phraseBars) + 1, phrase = Math.floor(bar / S.phraseBars) + 1;
-  const pos = `BAR <b>${pad(inPh, 2)}.${beat}</b>/${pad(S.phraseBars, 2)} &nbsp;PHR <b>${pad(phrase, 2)}</b>`;
-  setHTML('hud-stats', `SEP <b>${Math.round(V.sep * 100)}%</b> &nbsp;${pos} &nbsp;VOX <b>${pad(E.voices, 2)}</b>`);
-  setHTML('pos-readout', `${pad(inPh, 2)}.${beat} / ${pad(S.phraseBars, 2)} · PHR ${pad(phrase, 2)}`);
+  writeReadout(cache, 'hud-stats', [[
+    'SEP ', bold(`${Math.round(V.sep * 100)}%`),
+    ' \u00a0BAR ', bold(`${pad(inPh, 2)}.${beat}`), `/${pad(S.phraseBars, 2)} \u00a0PHR `,
+    bold(pad(phrase, 2)), ' \u00a0VOX ', bold(pad(E.voices, 2)),
+  ]]);
+  writeReadout(cache, 'pos-readout', [[`${pad(inPh, 2)}.${beat} / ${pad(S.phraseBars, 2)} · PHR ${pad(phrase, 2)}`]]);
   const p = S.sel;
   const phi = mod(p.angleAt(tv, E.playing), TAU) * 180 / Math.PI;
   const rps = E.playing ? p.omega() * (E.bpm / 60) / TAU : 0;
-  let rows = [
-    `<span class="k">TARGET LOCK</span> <span class="big">${p.name}</span>${p.hold ? ' · HOLD' : ''}`,
-    `<span class="k">X</span> ${signed(V.plateX(p), 3)} <span class="k">θ</span> ${phi.toFixed(1)}°`,
-    `<span class="k">ω</span> ${signed(rps, 3)} REV/S <span class="k">CYC</span> ${p.cycle}`,
-    `<span class="k">STEPS</span> ${p.steps}×${p.tracks} <span class="k">CHIPS</span> ${p.chips.length}`,
-    `<span class="k">CUT</span> ${p.cut}${p.choke ? ' · CHOKE' : ''} <span class="k">STYLE</span> ${S.style}`,
-    `<span class="k">TRIG</span> ${pad(E.stats.triggers, 6)}`,
+  let rows: ReadoutRow[] = [
+    [k('TARGET LOCK'), ' ', big(p.name), p.hold ? ' · HOLD' : ''],
+    [k('X'), ` ${signed(V.plateX(p), 3)} `, k('θ'), ` ${phi.toFixed(1)}°`],
+    [k('ω'), ` ${signed(rps, 3)} REV/S `, k('CYC'), ` ${p.cycle}`],
+    [k('STEPS'), ` ${p.steps}×${p.tracks} `, k('CHIPS'), ` ${p.chips.length}`],
+    [k('CUT'), ` ${p.cut}${p.choke ? ' · CHOKE' : ''} `, k('STYLE'), ` ${S.style}`],
+    [k('TRIG'), ` ${pad(E.stats.triggers, 6)}`],
   ];
   const F = flight;
   if (F.on) {
     const n = F.near;
     const P = F.polar(F.pos, 0);
     rows = [
-      `<span class="k">FLIGHT</span> <span class="big">${!F.autopilot ? 'MANUAL' : F.paused() ? 'AUTOPILOT · PAUSED' : 'AUTOPILOT'}</span>`,
-      `<span class="k">SPD</span> ${F.speed().toFixed(2)} U/S <span class="k">SENSOR</span> ${F.R.toFixed(2)} U`,
-      `<span class="k">X</span> ${signed(F.pos[0], 2)} <span class="k">R</span> ${P.r.toFixed(2)} <span class="k">θ</span> ${(mod(P.th, TAU) * 180 / Math.PI).toFixed(1)}°`,
-      n ? `<span class="k">NEAR</span> <span class="big">${n.plate.name}</span> <span class="k">ΔX</span> ${signed(n.dx, 2)}${n.inside ? ' · IN FIELD' : ''}` : `<span class="k">NEAR</span> —`,
-      n ? `<span class="k">FLAM</span> <span class="big">${signed(n.flamMs, 1)} MS</span> <span class="k">=</span> ${signed(n.steps, 2)} STEP` : '',
-      n ? `<span class="k">STEP</span> ${n.stepMs.toFixed(1)} MS` : '',
-      `<span class="k">SENSOR HITS</span> ${pad(F.stats.sensor, 6)}`,
+      [k('FLIGHT'), ' ', big(!F.autopilot ? 'MANUAL' : F.paused() ? 'AUTOPILOT · PAUSED' : 'AUTOPILOT')],
+      [k('SPD'), ` ${F.speed().toFixed(2)} U/S `, k('SENSOR'), ` ${F.R.toFixed(2)} U`],
+      [k('X'), ` ${signed(F.pos[0], 2)} `, k('R'), ` ${P.r.toFixed(2)} `, k('θ'), ` ${(mod(P.th, TAU) * 180 / Math.PI).toFixed(1)}°`],
+      n ? [k('NEAR'), ' ', big(n.plate.name), ' ', k('ΔX'), ` ${signed(n.dx, 2)}${n.inside ? ' · IN FIELD' : ''}`] : [k('NEAR'), ' —'],
+      ...(n ? [
+        [k('FLAM'), ' ', big(`${signed(n.flamMs, 1)} MS`), ' ', k('='), ` ${signed(n.steps, 2)} STEP`],
+        [k('STEP'), ` ${n.stepMs.toFixed(1)} MS`],
+      ] : []),
+      [k('SENSOR HITS'), ` ${pad(F.stats.sensor, 6)}`],
     ];
-    setHTML('flight-readout', n ? `${n.plate.name} · FLAM ${signed(n.flamMs, 1)} MS` : 'OPEN SPACE');
+    writeReadout(cache, 'flight-readout', [[n ? `${n.plate.name} · FLAM ${signed(n.flamMs, 1)} MS` : 'OPEN SPACE']]);
   } else {
-    setHTML('flight-readout', '');
+    writeReadout(cache, 'flight-readout', []);
   }
   E.pending.forEach((sw) => {
-    rows.push(`<span class="k">QUEUED</span> <span class="big">${sw.label}</span> @ BAR ${(Math.floor(sw.beat / 4) % S.phraseBars) + 1}`);
+    rows.push([k('QUEUED'), ' ', big(sw.label), ` @ BAR ${(Math.floor(sw.beat / 4) % S.phraseBars) + 1}`]);
   });
   const h = V.hover;
   if (h) {
@@ -66,24 +111,28 @@ function hudFrame(tv: number) {
     const pool = sounds.poolFor(pl);
     const snd = pool.length ? pool[c.srcPick % pool.length] : null;
     const f = snd ? pl.fragmentFor(c, snd) : null;
-    rows = rows.concat([
-      '&nbsp;',
-      `<span class="k">FRAGMENT</span> <span class="big">${snd ? snd.name : '—'}</span>`,
-      f ? `<span class="k">@</span> ${(f.offset * 1000).toFixed(0)} MS <span class="k">LEN</span> ${(f.dur * 1000).toFixed(0)} MS <span class="k">CUT</span> ${f.mode}` : '',
-      f ? `<span class="k">RATE</span> ${f.rate.toFixed(3)} <span class="k">P</span> ${Math.round(pl.probFor(c) * 100)}%` : '',
-      `<span class="k">CELL</span> T${c.track} S${c.sector}${c.accent ? ' · ACCENT' : ''}${c.isBeat ? ' · BEAT' : ''}`,
-      c.fx ? `<span class="k">FX</span> ${c.fx}${c.fx === 'ratchet' || c.fx === 'stutter' ? ' ×' + c.fxN : ''}` : '',
-    ]);
+    rows.push(
+      ['\u00a0'],
+      [k('FRAGMENT'), ' ', big(snd ? snd.name : '—')],
+    );
+    if (f) {
+      rows.push(
+        [k('@'), ` ${(f.offset * 1000).toFixed(0)} MS `, k('LEN'), ` ${(f.dur * 1000).toFixed(0)} MS `, k('CUT'), ` ${f.mode}`],
+        [k('RATE'), ` ${f.rate.toFixed(3)} `, k('P'), ` ${Math.round(pl.probFor(c) * 100)}%`],
+      );
+    }
+    rows.push([k('CELL'), ` T${c.track} S${c.sector}${c.accent ? ' · ACCENT' : ''}${c.isBeat ? ' · BEAT' : ''}`]);
+    if (c.fx) rows.push([k('FX'), ` ${c.fx}${c.fx === 'ratchet' || c.fx === 'stutter' ? ' ×' + c.fxN : ''}`]);
   }
-  setHTML('hud-tr', rows.filter(Boolean).join('<br>'));
+  writeReadout(cache, 'hud-tr', rows);
 }
 
 export function Hud() {
   useRevision();
   useEffect(() => {
-    // Cached strings belong to the current DOM, not a previous HUD mount.
-    htmlCache.clear();
-    return onFrame(hudFrame);
+    // Each subscription owns its DOM cache, including StrictMode remounts.
+    const cache: ReadoutCache = new Map();
+    return onFrame((tv) => hudFrame(tv, cache));
   }, []);
   return (
     <div id="hud">

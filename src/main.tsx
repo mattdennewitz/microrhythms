@@ -13,6 +13,7 @@ import { flight } from './core/flight';
 import { view } from './core/view';
 import { app } from './app/controller';
 import { App } from './ui/App';
+import { sharing } from './app/sharing';
 
 declare global {
   interface Window {
@@ -43,4 +44,7 @@ window.MR_DEBUG = {
 };
 if (import.meta.env.DEV) window.MR = { util, stack, sounds, engine, history, exporter, project, flight, view, app };
 
-createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+void sharing.init((message) => app.toast(message)).then((dispose) => {
+  import.meta.hot?.dispose(dispose);
+  createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+});

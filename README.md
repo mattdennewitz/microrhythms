@@ -126,6 +126,50 @@ position, the chance seed (so a reopened project exports the same hits) and your
 sounds, embedded as 16-bit audio. **⤒ OPEN .JSON** replaces the current machine with a
 saved one (playback stops; undo history starts fresh).
 
+**SHARE** copies a self-contained URL that restores the same project state,
+including patterns and edits, keep slots, custom sounds (the same 16-bit PCM as
+JSON files), flight settings, export settings and the deterministic chance seed.
+Playback does not start automatically. Links and project files use the same
+validated payload: `format: "orbital-stack"` and a **required integer `version: 1`**.
+Existing version-1 project exports remain supported within the safety budgets below;
+missing, malformed or unsupported versions are rejected before changing the machine.
+Inert out-of-range cells in older files are discarded on import. Custom sound IDs
+are preserved so random cut modes and exported fragments do not change on reopen.
+
+The URL hash updates at most every 500 ms using `history.replaceState`, without
+adding browser history entries. Share captures the setup at the click, including
+edits not yet written to the address bar. Hashes use
+`#mr2.<sha256-checksum>.<gzip-project>` with unpadded base64url components;
+no backend, R2, D1 or upload is involved. The checksum is checked before
+decompression. Broken, unsupported, oversized or schema-invalid links are rejected:
+the invalid hash is removed, an error is shown, and the current setup and playback
+are left unchanged. On initial load this leaves the untouched default setup.
+Older `#mr1.` share envelopes are not accepted; version-1 JSON files still import.
+
+The **entire URL** is limited to 16 KiB, with at most 1 MiB of decompressed JSON.
+Project imports and native sound additions are limited to 64 user sounds and
+8,640,000 total mono sample frames (180 seconds at 48 kHz), at most 90 seconds per
+sound. Names are bounded to 128 characters without invisible control characters.
+JSON project files have a 24 MiB input limit. Larger or less-compressible audio
+setups need **SAVE .JSON / OPEN .JSON** rather than a link. Sounds are never silently
+omitted, and messaging apps may impose shorter URL limits.
+
+Project files and links are validated with [Zod 4](https://zod.dev/): strict object,
+array, tuple, literal, enum, numeric and base64 schemas, without coercion or defaults.
+Zod refinements enforce sound identities, PCM frame budgets and cell bounds; a
+JSON-data preflight rejects accessors, inherited/decorated containers and prototype
+keys before parsing. Unknown fields and invalid values are rejected, not silently
+stripped, before state changes or native audio allocation. Imported labels are rendered only
+as text, never interpreted as HTML. Production assets also carry a Content Security
+Policy that blocks inline scripts, event handlers, objects and framing.
+
+**Integrity is not authenticity.** The checksum detects corruption, but anyone can
+construct another valid project and recompute it. A backend-free link cannot prove
+its author or prevent valid edits. It is not encrypted: anyone with the link can
+read the settings and embedded audio, which also appear in browser URL/history
+surfaces during automatic synchronization. If clipboard access is unavailable or
+denied, copy the address-bar URL after it updates.
+
 ## Your own sounds
 
 - **＋ ADD SOUNDS** or drop audio files anywhere (wav/mp3/ogg/flac/m4a/aif).
@@ -186,7 +230,11 @@ src/core/sounds.ts        synthesized built-ins, sample library, decoding, onset
 src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
 src/core/history.ts       undo / redo snapshots
 src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
-src/core/project.ts       save / open the whole machine as JSON
+src/core/project.ts       versioned save / open the whole machine as JSON
+src/core/project-format.ts strict Zod schemas for project files and share links
+src/core/project-limits.ts shared sound budgets and Zod label schema
+src/core/share-codec.ts   bounded gzip / base64url state links
+src/app/sharing.ts       hash restoration, throttled synchronization and clipboard
 src/core/flight.ts        flight mode: ship, autopilot path, sensor read head
 src/core/view.ts          perspective camera + Canvas2D line-art, picking
 src/core/bridge.ts        the few things the core asks of the UI (panel width, keep slots, sync)
@@ -231,7 +279,8 @@ npm run preview    # serve the last production build locally (build first)
 ```
 
 The core tests cover deterministic helpers and plates, JSON snapshots,
-stopped-engine undo/redo, and WAV/ZIP encoding. They do not exercise React DOM,
+stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
+validation and bounded share-link roundtrips. They do not exercise React DOM,
 browser audio playback or offline audio rendering; check those in a browser.
 
 GitHub Actions runs the `Tests` check on every push and pull request to `main`,
