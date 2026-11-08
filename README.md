@@ -234,6 +234,12 @@ The core tests cover deterministic helpers and plates, JSON snapshots,
 stopped-engine undo/redo, and WAV/ZIP encoding. They do not exercise React DOM,
 browser audio playback or offline audio rendering; check those in a browser.
 
+GitHub Actions runs the `Tests` check on every push and pull request to `main`,
+using Node.js 24, `npm ci`, `npm test`, and the typechecked production build.
+Merging to `main` requires a pull request with this check passing against the
+latest `main`; the requirement also applies to administrators. Branch protection
+is configured in GitHub repository settings, not in the workflow file.
+
 The production HTML and hashed JS/CSS live in
 `.cloudflare/output/v0/workers/default/assets/`, alongside Cloudflare deployment
 metadata. `preview` uses this Build Output in the local Workers runtime; it does
