@@ -1,4 +1,6 @@
 /* Shared limits for native additions and the version-1 project boundary. */
+import { z } from 'zod';
+
 export const MAX_USER_SOUNDS = 64;
 export const MAX_USER_SAMPLES = 8_640_000;
 export const MAX_SOUND_SECONDS = 90;
@@ -10,7 +12,6 @@ export const BUILTIN_NAMES = ['GLASS', 'TICK', 'BREATH', 'WOOD', 'SUB', 'WIRE', 
 export const MAX_SOURCE_IDS = MAX_USER_SOUNDS + BUILTIN_NAMES.length;
 
 /** Labels remain inert text; reject invisible controls, not punctuation or Unicode. */
-export function validSoundName(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= MAX_SOUND_NAME && value.trim().length > 0
-    && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(value);
-}
+export const soundNameSchema = z.string().min(1).max(MAX_SOUND_NAME)
+  .regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]*$/)
+  .refine((value) => value.trim().length > 0, 'Sound name cannot be blank');

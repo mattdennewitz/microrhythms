@@ -154,9 +154,12 @@ JSON project files have a 24 MiB input limit. Larger or less-compressible audio
 setups need **SAVE .JSON / OPEN .JSON** rather than a link. Sounds are never silently
 omitted, and messaging apps may impose shorter URL limits.
 
-Every accepted record uses an explicit schema: unknown/prototype fields, extra
-array properties, invalid types, nonfinite numbers and malformed PCM are rejected
-before state changes or native audio allocation. Imported labels are rendered only
+Project files and links are validated with [Zod 4](https://zod.dev/): strict object,
+array, tuple, literal, enum, numeric and base64 schemas, without coercion or defaults.
+Zod refinements enforce sound identities, PCM frame budgets and cell bounds; a
+JSON-data preflight rejects accessors, inherited/decorated containers and prototype
+keys before parsing. Unknown fields and invalid values are rejected, not silently
+stripped, before state changes or native audio allocation. Imported labels are rendered only
 as text, never interpreted as HTML. Production assets also carry a Content Security
 Policy that blocks inline scripts, event handlers, objects and framing.
 
@@ -228,8 +231,8 @@ src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, sp
 src/core/history.ts       undo / redo snapshots
 src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
 src/core/project.ts       versioned save / open the whole machine as JSON
-src/core/project-format.ts shared validation for project files and share links
-src/core/project-limits.ts shared native/import sound and processing budgets
+src/core/project-format.ts strict Zod schemas for project files and share links
+src/core/project-limits.ts shared sound budgets and Zod label schema
 src/core/share-codec.ts   bounded gzip / base64url state links
 src/app/sharing.ts       hash restoration, throttled synchronization and clipboard
 src/core/flight.ts        flight mode: ship, autopilot path, sensor read head

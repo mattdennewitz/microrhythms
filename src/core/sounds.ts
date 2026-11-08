@@ -6,7 +6,7 @@ import { engine } from './engine';
 import type { Sound } from './types';
 import {
   BUILTIN_NAMES, MAX_USER_SOUNDS, MAX_USER_SAMPLES, MAX_SOUND_SECONDS, MAX_SOUND_NAME,
-  MAX_SOUND_ID, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE, validSoundName,
+  MAX_SOUND_ID, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE, soundNameSchema,
 } from './project-limits';
 
 const SR = 48000;
@@ -309,7 +309,7 @@ export const sounds = {
   get(id: number): Sound | undefined { return this.list.find((s) => s.id === id); },
 
   add(name: string, buffer: AudioBuffer, builtin = false, emit = true, savedId?: number): Sound {
-    if (!validSoundName(name)) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
+    if (!soundNameSchema.safeParse(name).success) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
     if (builtin) {
       if (!(BUILTIN_NAMES as readonly string[]).includes(name) || this.byName(name)) throw new Error('invalid or duplicate builtin sound');
     } else userCapacity(this.list, buffer.length, buffer.sampleRate);
@@ -331,7 +331,7 @@ export const sounds = {
 
   /** Add a user sound and feed it to every plate (rhythms are preserved). */
   addUser(name: string, buffer: AudioBuffer): Sound {
-    if (!validSoundName(name)) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
+    if (!soundNameSchema.safeParse(name).success) throw new Error(`sound name must be nonempty text of at most ${MAX_SOUND_NAME} characters without controls`);
     // Reject over-budget additions before mono/trim, peaks or onset allocations.
     userCapacity(this.list, Math.min(buffer.length, Math.floor(buffer.sampleRate * MAX_SOUND_SECONDS)), buffer.sampleRate);
     const snd = this.add(name, condition(buffer));
