@@ -5,8 +5,9 @@ chip on a plate is a fragment of a sound. When a chip's rotating angle crosses t
 plate's fixed **read head** (the shaded wedge at ~3 o'clock), its fragment plays,
 from where it sits in the stack.
 
-Open `index.html` directly in a browser (no build, no server, no network needed —
-the IBM Plex Mono webfont is optional). Press **space** or **▶ PLAY**.
+Live at <https://microrhythms.dennewitz.computer>, or open `public/index.html`
+directly in a browser (no build, no server, no network needed — the IBM Plex Mono
+webfont is optional). Press **space** or **▶ PLAY**.
 
 ## How it works
 
@@ -172,16 +173,33 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 ## Files
 
 ```
-index.html        layout
-css/style.css     HUD + panel styling
-js/util.js        PRNG, euclidean rhythm, scale quantiser
-js/stack.js       plates, chips, styles, breaks, FX, cut modes, snapshots
-js/sounds.js      synthesized built-ins, sample library, decoding, onsets
-js/engine.js      beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
-js/history.js     undo / redo snapshots
-js/export.js      WAV encoder, ZIP writer, loop folding, export actions
-js/project.js     save / open the whole machine as JSON
-js/render.js      perspective camera + Canvas2D line-art, picking
-js/ui.js          panel, HUD readouts, meters, pointer/keyboard
-js/main.js        boot + frame loop (exposes window.MR_DEBUG)
+public/index.html        layout
+public/css/style.css     HUD + panel styling
+public/js/util.js        PRNG, euclidean rhythm, scale quantiser
+public/js/stack.js       plates, chips, styles, breaks, FX, cut modes, snapshots
+public/js/sounds.js      synthesized built-ins, sample library, decoding, onsets
+public/js/engine.js      beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
+public/js/history.js     undo / redo snapshots
+public/js/export.js      WAV encoder, ZIP writer, loop folding, export actions
+public/js/project.js     save / open the whole machine as JSON
+public/js/render.js      perspective camera + Canvas2D line-art, picking
+public/js/ui.js          panel, HUD readouts, meters, pointer/keyboard
+public/js/main.js        boot + frame loop (exposes window.MR_DEBUG)
 ```
+
+## Deploying
+
+The site is plain static files in `public/`, served by a Cloudflare Worker (static
+assets only, no Worker script) on the custom domain
+`microrhythms.dennewitz.computer`. Config lives in `cloudflare.config.ts` (Worker
+name, account, domain) and `wrangler.config.ts` (assets directory), and deploys
+with Cloudflare's `cf` CLI:
+
+```
+npm install
+npm run dev      # local preview
+npm run deploy   # cf deploy → production
+```
+
+`cf` must be signed in to the account that owns the `dennewitz.computer` zone
+(`cf auth whoami`).
