@@ -5,9 +5,9 @@ chip on a plate is a fragment of a sound. When a chip's rotating angle crosses t
 plate's fixed **read head** (the shaded wedge at ~3 o'clock), its fragment plays,
 from where it sits in the stack.
 
-Live at <https://microrhythms.dennewitz.computer>, or open `public/index.html`
-directly in a browser (no build, no server, no network needed — the IBM Plex Mono
-webfont is optional). Press **space** or **▶ PLAY**.
+Live at <https://microrhythms.dennewitz.computer>, or run it locally with
+`npm install && npm run dev` (see [Developing](#developing)). It needs no network
+once loaded — the IBM Plex Mono webfont is optional. Press **space** or **▶ PLAY**.
 
 ## How it works
 
@@ -172,34 +172,108 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 
 ## Files
 
+TypeScript, built with Vite. The machine (`src/core`) is plain TypeScript with no UI
+dependency; the panel, HUD and input handling (`src/ui`) are React.
+
 ```
-public/index.html        layout
-public/css/style.css     HUD + panel styling
-public/js/util.js        PRNG, euclidean rhythm, scale quantiser
-public/js/stack.js       plates, chips, styles, breaks, FX, cut modes, snapshots
-public/js/sounds.js      synthesized built-ins, sample library, decoding, onsets
-public/js/engine.js      beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
-public/js/history.js     undo / redo snapshots
-public/js/export.js      WAV encoder, ZIP writer, loop folding, export actions
-public/js/project.js     save / open the whole machine as JSON
-public/js/render.js      perspective camera + Canvas2D line-art, picking
-public/js/ui.js          panel, HUD readouts, meters, pointer/keyboard
-public/js/main.js        boot + frame loop (exposes window.MR_DEBUG)
+index.html                Vite entry
+src/main.tsx              boot: build the machine, mount React (exposes window.MR_DEBUG)
+src/styles.css            HUD + panel styling
+src/core/util.ts          PRNG, euclidean rhythm, scale quantiser
+src/core/types.ts         shared shapes: Sound, Chip, FX, motion, pose
+src/core/stack.ts         plates, chips, styles, breaks, FX, cut modes, snapshots
+src/core/sounds.ts        synthesized built-ins, sample library, decoding, onsets
+src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
+src/core/history.ts       undo / redo snapshots
+src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
+src/core/project.ts       save / open the whole machine as JSON
+src/core/flight.ts        flight mode: ship, autopilot path, sensor read head
+src/core/view.ts          perspective camera + Canvas2D line-art, picking
+src/core/bridge.ts        the few things the core asks of the UI (panel width, keep slots, sync)
+src/app/controller.ts     every UI action and the UI's own state (keep slots, toasts, shortcuts)
+src/app/store.ts          change notifications for React + per-frame callbacks
+src/app/loop.ts           the frame loop: events → flashes, camera, listener, draw, HUD
+src/ui/App.tsx            page layout, flight dock, toast, live region, file drop
+src/ui/Panel.tsx          the side panel: transport, flight, compose, layer, output, handling
+src/ui/Sounds.tsx         sound list, sample pool, fragment map
+src/ui/Hud.tsx            HUD readouts and meters (written per frame, outside React renders)
+src/ui/Stage.tsx          stack canvas: orbit, zoom, picking, keyboard cell cursor
+src/ui/keys.ts            window shortcuts and flight keys
+src/ui/controls.tsx       slider, segmented row, toggle, tap / long-press
 ```
+
+The core keeps its state in mutable singletons. UI actions change that state and call
+`notify()`; components re-read what they show. Anything that changes every frame
+(HUD text, meters, the fragment map) is drawn from the frame loop through refs, so
+React never re-renders at 60 fps. In development builds every core module is also on
+`window.MR` for poking at from the console.
+
+React effects own their canvas animation loop, resize/input listeners and frame
+subscriptions, and release them on unmount. Pending long-press timers, held flight
+keys and panel references are cleared too. Remounting (including StrictMode effect
+replay) rebinds the current canvas and refreshes HUD text; core singleton state
+persists across UI remounts.
+
+## Developing
+
+Use **Node.js 22.18 or later** and npm; **Node.js 24 LTS** is recommended.
+Cloudflare loads `cloudflare.config.ts` using Node's TypeScript support; Bun is
+not a supported runtime for the `cf` CLI.
+The committed lockfile pins the CLI, Vite and the Cloudflare plugin v2 beta.
+
+```
+npm ci
+npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
+npm run typecheck  # tsc, including Vite and Cloudflare configuration
+npm test           # dependency-free core regression tests using Node's TS support
+npm run build      # typecheck + production build into .cloudflare/output/v0
+npm run preview    # serve the last production build locally (build first)
+```
+
+The core tests cover deterministic helpers and plates, JSON snapshots,
+stopped-engine undo/redo, and WAV/ZIP encoding. They do not exercise React DOM,
+browser audio playback or offline audio rendering; check those in a browser.
+
+GitHub Actions runs the `Tests` check on every push and pull request to `main`,
+using Node.js 24, `npm ci`, `npm test`, and the typechecked production build.
+Merging to `main` requires a pull request with this check passing against the
+latest `main`; the requirement also applies to administrators. Branch protection
+is configured in GitHub repository settings, not in the workflow file.
+
+The production HTML and hashed JS/CSS live in
+`.cloudflare/output/v0/workers/default/assets/`, alongside Cloudflare deployment
+metadata. `preview` uses this Build Output in the local Workers runtime; it does
+not rebuild or publish a remote preview. Rebuild after changing source files.
+For Vite server flags, invoke Vite directly, for example
+`npx --no-install vite --host 127.0.0.1 --port 5173`; `cf dev` only forwards `--mode`.
+
+Because the code is ES modules, the page has to be served — opening `index.html`
+from disk (`file://`) no longer works.
 
 ## Deploying
 
-The site is plain static files in `public/`, served by a Cloudflare Worker (static
-assets only, no Worker script) on the custom domain
-`microrhythms.dennewitz.computer`. Config lives in `cloudflare.config.ts` (Worker
-name, account, domain) and `wrangler.config.ts` (assets directory), and deploys
-with Cloudflare's `cf` CLI:
+The production build is static files served by a Cloudflare Worker (static assets
+only, no Worker script) on the custom domain `microrhythms.dennewitz.computer`.
+`cloudflare.config.ts` holds the Worker name, account and domain; the Cloudflare
+Vite plugin (v2) reads it, and Cloudflare's `cf` CLI builds and deploys:
 
 ```
-npm install
-npm run dev      # local preview
-npm run deploy   # cf deploy → production
+npm run deploy -- --dry-run  # typecheck, build and validate; no upload or credentials
+npm run deploy              # typecheck, build and deploy to production
 ```
 
-`cf` must be signed in to the account that owns the `dennewitz.computer` zone
-(`cf auth whoami`).
+`cf deploy` builds through Vite rather than invoking the npm `build` script, so
+both `build` and `deploy` explicitly run the TypeScript check first. A dry run
+does not verify account permissions, domain ownership or remote availability.
+To validate an existing production build without rebuilding, use
+`npx --no-install cf deploy --prebuilt --mode production --dry-run`.
+
+For an actual deployment, sign in with `npx --no-install cf auth login`, then
+inspect `npx --no-install cf auth whoami`, or supply `CLOUDFLARE_API_TOKEN` in CI
+with access to the configured account and zone. `cf` has its own credentials and
+does not reuse a Wrangler login. Keep credentials out of source control; an
+environment `CLOUDFLARE_ACCOUNT_ID` overrides the account in configuration.
+
+See Cloudflare's [CLI requirements and authentication](https://developers.cloudflare.com/cf/get-started/),
+[build and deployment commands](https://developers.cloudflare.com/cf/projects/),
+and [Vite plugin v2 beta behavior](https://developers.cloudflare.com/workers/vite-plugin/v2-beta/).

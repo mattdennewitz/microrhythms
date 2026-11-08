@@ -2,3 +2,4 @@ node_modules/
 .wrangler/
 .cloudflare/
 .DS_Store
+.claude/worktrees/
