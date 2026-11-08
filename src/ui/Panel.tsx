@@ -330,6 +330,7 @@ function Output() {
       <div className="row">
         <button id="btn-save-project" title="Download the whole machine as a .json file: settings, plates, keep slots, flight and your sounds" onClick={() => app.saveProject()}>⤓ SAVE .JSON</button>
         <button id="btn-open-project" title="Open a saved .json project (replaces the current machine)" onClick={() => projectInput.current?.click()}>⤒ OPEN .JSON</button>
+        <button id="btn-share" title="Copy a link to this setup, including settings and sounds" disabled={app.shareBusy} onClick={() => app.share()}>{app.shareBusy ? 'SHARING…' : 'SHARE'}</button>
       </div>
       <input type="file" id="project-input" hidden accept=".json,application/json" ref={projectInput}
         onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) app.openProject(f); }} />

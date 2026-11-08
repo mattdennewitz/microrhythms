@@ -126,6 +126,27 @@ position, the chance seed (so a reopened project exports the same hits) and your
 sounds, embedded as 16-bit audio. **⤒ OPEN .JSON** replaces the current machine with a
 saved one (playback stops; undo history starts fresh).
 
+**SHARE** copies a self-contained URL that restores the same project state,
+including patterns and edits, keep slots, custom sounds (the same 16-bit PCM as
+JSON files), flight settings, export settings and the deterministic chance seed.
+Playback does not start automatically. Links and project files use the same
+validated payload: `format: "orbital-stack"` and a **required integer `version: 1`**.
+Existing version-1 project exports remain supported; missing, malformed or
+unsupported versions are rejected before changing the machine.
+
+The URL hash updates at most every 500 ms using `history.replaceState`, without
+adding browser history entries. Share captures the setup at the click, including
+edits not yet written to the address bar. Hashes use `#mr1.` followed by gzip JSON
+encoded as base64url; no backend or upload is involved. Invalid or unsupported
+links load the default setup and display an explanation.
+
+Share payloads are limited to 8 MiB of uncompressed JSON and a 2 MiB hash.
+Large recordings can exceed these limits, and messaging apps may impose much
+shorter URL limits; use **SAVE .JSON / OPEN .JSON** for those projects. Sounds are
+never silently omitted. Anyone with a link can read its settings and embedded
+audio. If clipboard access is unavailable or denied, copy the address-bar URL
+after it updates.
+
 ## Your own sounds
 
 - **＋ ADD SOUNDS** or drop audio files anywhere (wav/mp3/ogg/flac/m4a/aif).
@@ -186,7 +207,10 @@ src/core/sounds.ts        synthesized built-ins, sample library, decoding, onset
 src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
 src/core/history.ts       undo / redo snapshots
 src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
-src/core/project.ts       save / open the whole machine as JSON
+src/core/project.ts       versioned save / open the whole machine as JSON
+src/core/project-format.ts shared validation for project files and share links
+src/core/share-codec.ts   bounded gzip / base64url state links
+src/app/sharing.ts       hash restoration, throttled synchronization and clipboard
 src/core/flight.ts        flight mode: ship, autopilot path, sensor read head
 src/core/view.ts          perspective camera + Canvas2D line-art, picking
 src/core/bridge.ts        the few things the core asks of the UI (panel width, keep slots, sync)
@@ -231,7 +255,8 @@ npm run preview    # serve the last production build locally (build first)
 ```
 
 The core tests cover deterministic helpers and plates, JSON snapshots,
-stopped-engine undo/redo, and WAV/ZIP encoding. They do not exercise React DOM,
+stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
+validation and bounded share-link roundtrips. They do not exercise React DOM,
 browser audio playback or offline audio rendering; check those in a browser.
 
 GitHub Actions runs the `Tests` check on every push and pull request to `main`,

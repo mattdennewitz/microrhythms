@@ -13,6 +13,7 @@ import { view } from '../core/view';
 import { registerUi } from '../core/bridge';
 import type { FxType } from '../core/types';
 import { notify } from './store';
+import { sharing } from './sharing';
 
 const NARROW = 760;
 
@@ -30,6 +31,7 @@ export const app = {
   announceMsg: { text: '', n: 0 },
   exportStatus: null as string | null, // null = the default summary line
   exportBusy: false,
+  shareBusy: false,
   mic: { state: 'idle' as 'idle' | 'starting' | 'recording', elapsed: 0 },
   resampling: false,
   panelEl: null as HTMLElement | null,
@@ -272,6 +274,23 @@ export const app = {
       this.exportStatus = msg;
       this.toast(msg);
     } catch (err) { this.toast(`could not save: ${(err as Error).message}`); console.error(err); }
+  },
+  async share() {
+    if (this.shareBusy) return;
+    this.shareBusy = true;
+    notify();
+    try {
+      await sharing.copy();
+      this.toast('share link copied');
+      this.announce('share link copied');
+    } catch (err) {
+      const message = `could not share: ${(err as Error).message}`;
+      this.toast(message);
+      this.announce(message);
+    } finally {
+      this.shareBusy = false;
+      notify();
+    }
   },
   async openProject(f: File) {
     try {

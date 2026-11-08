@@ -36,11 +36,13 @@ export function Stage() {
         if (Math.abs(dx) + Math.abs(dy) > 4) { down.moved = true; cv.classList.add('dragging'); }
         if (flight.on) {
           flight.look((e.clientX - down.lx) * 0.004, -(e.clientY - down.ly) * 0.004);
+          notify();
           down.lx = e.clientX; down.ly = e.clientY;
           return;
         }
         V.dragYaw = down.yaw - dx * 0.005;
         V.dragPitch = down.pitch + dy * 0.004;
+        notify();
         return;
       }
       const hit = V.pick(e.clientX, e.clientY, engine.visualTime(), engine.playing);
@@ -78,8 +80,9 @@ export function Stage() {
         return;
       }
       V.zoom = clamp(V.zoom * Math.exp(e.deltaY * 0.001), 0.45, 2.2);
+      notify();
     }, { passive: false });
-    on('dblclick', () => { if (!flight.on) { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; } });
+    on('dblclick', () => { if (!flight.on) { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; notify(); } });
 
     // ---- keyboard cell cursor
     on('focus', () => app.syncCell(true));
@@ -124,7 +127,7 @@ export function Stage() {
       else if (e.key === '0') { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; }
       else handled = false;
       // the window-level shortcut handler must not see keys the stack used
-      if (handled) { e.preventDefault(); e.stopPropagation(); }
+      if (handled) { notify(); e.preventDefault(); e.stopPropagation(); }
     });
     return () => {
       ac.abort();

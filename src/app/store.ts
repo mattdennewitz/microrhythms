@@ -11,7 +11,7 @@ export function notify() {
   listeners.forEach((fn) => fn());
 }
 
-function subscribe(fn: () => void) {
+export function subscribe(fn: () => void) {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
