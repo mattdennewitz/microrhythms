@@ -1,7 +1,17 @@
-/* Panel, HUD, pointer + keyboard handling. */
-(function (MR) {
-  'use strict';
-  const { clamp, pad, signed, TAU, mod } = MR.util;
+/* Panel, HUD, pointer + keyboard handling.
+ * TEMPORARY (phase 1 of the React migration): the old DOM UI as an ES module,
+ * so the TypeScript core can be checked against the old build before the React UI replaces this file. */
+import { clamp, pad, signed, TAU, mod } from './core/util';
+import { stack } from './core/stack';
+import { sounds } from './core/sounds';
+import { engine } from './core/engine';
+import { history } from './core/history';
+import { exporter } from './core/exporter';
+import { project } from './core/project';
+import { flight } from './core/flight';
+import { view } from './core/view';
+import { registerUi } from './core/bridge';
+
   const $ = (id) => document.getElementById(id);
   const FX_TYPES = ['ratchet', 'stutter', 'reverse', 'throw'];
 
@@ -124,8 +134,8 @@
       this.bindButtons();
       this.bindSounds();
       this.bindPointer();
-      MR.sounds.onChange(() => { this.renderSounds(); this.renderPool(); });
-      MR.history.onChange((type) => {
+      sounds.onChange(() => { this.renderSounds(); this.renderPool(); });
+      history.onChange((type) => {
         // any new edit means the stack no longer equals the active keep slot
         if (type === 'push' && this.activeSlot != null) { this.activeSlot = null; this.syncKeep(); }
         this.syncHistory();
@@ -136,9 +146,9 @@
       this.renderSounds();
       this.renderKeep();
       this.syncHistory();
-      this.select(MR.stack.selected);
-      MR.engine.onEvolve = () => this.syncLayer();
-      MR.engine.onSwitch = (sw) => this.afterSwitch(sw);
+      this.select(stack.selected);
+      engine.onEvolve = () => this.syncLayer();
+      engine.onSwitch = (sw) => this.afterSwitch(sw);
       this.setPanelHidden(window.innerWidth <= 760);
       // keep the hidden panel out of the tab order however the class changes
       new MutationObserver(() => {
@@ -149,8 +159,8 @@
 
     /** Every generative / edit action: record undo, change state, re-sync. */
     act(label, fn, align = true) {
-      MR.history.push(label);
-      MR.engine.applyNow(fn, align);
+      history.push(label);
+      engine.applyNow(fn, align);
       this.activeSlot = null;
       this.syncLayer();
       this.syncKeep();
@@ -158,7 +168,7 @@
 
     // ------------------------------------------------------------ transport
     buildTransport() {
-      const c = $('transport-sliders'), E = MR.engine;
+      const c = $('transport-sliders'), E = engine;
       this.sliders.bpm = slider(c, { key: 'bpm', label: 'TEMPO', min: 40, max: 200, step: 1, reset: 112,
         fmt: (v) => `${Math.round(v)} BPM`, onInput: (v) => { E.setBpm(v); if (this.lenSeg) this.syncExport(); } });
       this.sliders.master = slider(c, { key: 'master', label: 'MASTER', min: 0, max: 1.5, step: 0.01, reset: 0.9,
@@ -166,19 +176,19 @@
       this.sliders.space = slider(c, { key: 'space', label: 'SPACE', min: 0, max: 1, step: 0.01, reset: 0.28,
         fmt: (v) => `${Math.round(v * 100)}%`, onInput: (v) => E.setSpace(v) });
       this.sliders.sep = slider(c, { key: 'sep', label: 'SEPARATION', min: 0.3, max: 2.4, step: 0.01, reset: 1.25,
-        fmt: (v) => `${Math.round(v * 100)}%`, onInput: (v) => { MR.view.sepTarget = v; } });
+        fmt: (v) => `${Math.round(v * 100)}%`, onInput: (v) => { view.sepTarget = v; } });
       this.sliders.evolve = slider(c, { key: 'evolve', label: 'EVOLVE', min: 0, max: 1, step: 0.01, reset: 0,
         fmt: (v) => (v === 0 ? 'OFF' : `${Math.round(v * 100)}%/BAR`), onInput: (v) => { E.evolveAmount = v; } });
       this.sliders.bpm.set(E.bpm);
       this.sliders.master.set(E.masterLevel);
       this.sliders.space.set(E.spaceLevel);
-      this.sliders.sep.set(MR.view.sepTarget);
+      this.sliders.sep.set(view.sepTarget);
       this.sliders.evolve.set(E.evolveAmount);
     },
 
     // ------------------------------------------------------------ flight
     buildFlight() {
-      const F = MR.flight;
+      const F = flight;
       const c = $('flight-sliders');
       this.sliders.sensorR = slider(c, { key: 'sensorr', label: 'SENSOR', min: 0.06, max: 0.8, step: 0.01, reset: 0.38,
         fmt: (v) => `${v.toFixed(2)} U`, onInput: (v) => { F.R = v; } });
@@ -215,12 +225,12 @@
     },
 
     toggleFlight() {
-      const F = MR.flight;
+      const F = flight;
       if (F.on) F.exit(); else F.enter();
       setOn($('btn-fly'), F.on);
       $('btn-fly').textContent = F.on ? '✈ LAND' : '✈ FLY';
       document.body.classList.toggle('flying', F.on);
-      $('hud-mode').textContent = F.on ? 'FLIGHT' : MR.view.mode;
+      $('hud-mode').textContent = F.on ? 'FLIGHT' : view.mode;
       $('export-flight-note').hidden = !F.on;
       if (!F.on) setHTML('flight-readout', '');
       $('fly-dock').classList.toggle('flying', F.on);
@@ -228,13 +238,13 @@
       this.syncAutopilot();
       if (F.on) $('hud-hint').classList.add('gone');
       const resumed = F.on && F.saved;
-      const msg = !F.on ? 'landed — take off again to resume from here' : resumed ? 'flight resumed where you landed' : MR.engine.playing ? 'flight — autopilot cruising · W/A/S/D to take the stick'
+      const msg = !F.on ? 'landed — take off again to resume from here' : resumed ? 'flight resumed where you landed' : engine.playing ? 'flight — autopilot cruising · W/A/S/D to take the stick'
         : 'flight — autopilot cruises when you press play · W/A/S/D to fly now';
       this.toast(msg);
       this.announce(msg);
     },
     toggleAutopilot() {
-      const F = MR.flight;
+      const F = flight;
       if (!F.on) return;
       if (F.autopilot) F.takeManual(); else F.engageAutopilot();
       this.syncAutopilot();
@@ -242,15 +252,15 @@
     syncAutopilot() {
       for (const id of ['btn-autopilot', 'dock-auto']) {
         const b = $(id);
-        setOn(b, MR.flight.autopilot);
-        b.textContent = !MR.flight.autopilot ? 'MANUAL' : MR.flight.paused() ? 'AUTOPILOT ❚❚' : 'AUTOPILOT';
+        setOn(b, flight.autopilot);
+        b.textContent = !flight.autopilot ? 'MANUAL' : flight.paused() ? 'AUTOPILOT ❚❚' : 'AUTOPILOT';
       }
     },
 
     /** On-canvas dock: FLY/LAND always reachable (mobile panel is hidden), plus
      *  hold-to-thrust buttons so flight works with touch or mouse alone. */
     bindDock() {
-      const F = MR.flight;
+      const F = flight;
       $('dock-fly').addEventListener('click', () => this.toggleFlight());
       $('dock-auto').addEventListener('click', () => this.toggleAutopilot());
       const hold = (id, key) => {
@@ -275,7 +285,7 @@
 
     // ------------------------------------------------------------ compose
     buildCompose() {
-      const S = MR.stack, E = MR.engine;
+      const S = stack, E = engine;
       // style picker as buttons: a focused <select> would swallow every shortcut key (type-ahead)
       this.styleSeg = seg($('style-row'), S.STYLE_NAMES.map((n) => ({ label: n, value: n })),
         (v) => { S.style = v; this.styleSeg.set(v); });
@@ -292,7 +302,7 @@
       this.sliders.breaks = slider(c, { key: 'breaks', label: 'BREAKS', min: 0, max: 1, step: 0.01, reset: 0,
         fmt: (v) => (v === 0 ? 'OFF' : pct(v)), onInput: (v) => { S.breaks = v; } });
       this.sliders.onBeatAll = slider(c, { key: 'onbeatall', label: 'BEAT·ALL', min: 0, max: 1, step: 0.01, reset: 0,
-        fmt: pct, onStart: () => MR.history.push('onbeat-all', true),
+        fmt: pct, onStart: () => history.push('onbeat-all', true),
         onInput: (v) => { S.plates.forEach((p) => { p.onBeat = v; p.generate(); }); this.syncLayer(); } });
       this.sliders.fxWet = slider(c, { key: 'fxwet', label: 'THROW WET', min: 0, max: 1, step: 0.01, reset: 0.5,
         fmt: pct, onInput: (v) => E.setFxWet(v) });
@@ -326,16 +336,16 @@
     },
 
     newPhrase() {
-      const S = MR.stack;
+      const S = stack;
       this.act(`new phrase · ${S.style}`, () => S.drawAll(S.style));
       this.toast(`new phrase · ${S.style}${S.plates.some((p) => p.hold) ? ' · held plates kept' : ''}`);
     },
 
     queuePhrase() {
-      const S = MR.stack, E = MR.engine;
+      const S = stack, E = engine;
       if (E.pendingOf('phrase')) { E.cancel('phrase'); this.syncQueued(); this.toast('queued phrase cancelled'); return; }
       const style = S.style;
-      const sw = E.queue('phrase', 'phrase', () => { MR.history.push(`new phrase · ${style}`); S.drawAll(style); this.activeSlot = null; }, 'NEW');
+      const sw = E.queue('phrase', 'phrase', () => { history.push(`new phrase · ${style}`); S.drawAll(style); this.activeSlot = null; }, 'NEW');
       if (!sw) { this.afterSwitch(); return; }
       this.syncQueued();
       this.toast(`new phrase (${style}) at the next phrase line`);
@@ -344,21 +354,21 @@
     keep(slot) {
       const i = slot != null ? slot : this.slots.indexOf(null);
       if (i < 0) { this.toast('all four slots full — release one with ×'); return; }
-      this.slots[i] = MR.stack.snapshot();
+      this.slots[i] = stack.snapshot();
       this.activeSlot = i;
       this.renderKeep();
       this.toast(`kept → slot ${i + 1}`);
     },
 
     recall(i, quant) {
-      const E = MR.engine;
+      const E = engine;
       const snap = this.slots[i];
       if (!snap) return;
       const pend = E.pendingOf('scene');
       if (pend && pend.slot === i && pend.quant === quant) { E.cancel('scene'); this.syncQueued(); this.toast(`slot ${i + 1} recall cancelled`); this.announce(`slot ${i + 1} recall cancelled`); return; }
       const sw = E.queue('scene', quant, () => {
-        MR.history.push(`recall ${i + 1}`);
-        MR.stack.restore(snap);
+        history.push(`recall ${i + 1}`);
+        stack.restore(snap);
         this.activeSlot = i;
       }, `K${i + 1}`);
       if (!sw) { this.afterSwitch(); this.announce(`slot ${i + 1} recalled`); return; }
@@ -369,8 +379,8 @@
     },
 
     release(i) {
-      const pend = MR.engine.pendingOf('scene');
-      if (pend && pend.slot === i) MR.engine.cancel('scene');
+      const pend = engine.pendingOf('scene');
+      if (pend && pend.slot === i) engine.cancel('scene');
       this.slots[i] = null;
       if (this.activeSlot === i) this.activeSlot = null;
       this.renderKeep();
@@ -407,7 +417,7 @@
       this.syncKeep();
     },
     syncKeep() {
-      const pend = MR.engine.pendingOf('scene');
+      const pend = engine.pendingOf('scene');
       (this.slotEls || []).forEach((b, i) => {
         const s = this.slots[i];
         const active = this.activeSlot === i, queued = !!pend && pend.slot === i;
@@ -421,7 +431,7 @@
     },
 
     syncQueued() {
-      const E = MR.engine;
+      const E = engine;
       const pend = E.pendingOf('scene');
       (this.slotEls || []).forEach((b, i) => b.classList.toggle('queued', !!pend && pend.slot === i));
       $('btn-new-phrase').classList.toggle('queued', !!E.pendingOf('phrase'));
@@ -435,23 +445,23 @@
     },
 
     cancelQueued() {
-      const E = MR.engine;
+      const E = engine;
       if (!E.pending.length) return;
       E.pending = [];
       this.syncQueued();
     },
     undo() {
       this.cancelQueued();
-      const l = MR.history.undo();
+      const l = history.undo();
       if (l) { this.activeSlot = null; this.afterSwitch(); this.toast(`undo · ${l.replace(/^L_/, '')}`); }
     },
     redo() {
       this.cancelQueued();
-      const l = MR.history.redo();
+      const l = history.redo();
       if (l) { this.activeSlot = null; this.afterSwitch(); this.toast(`redo · ${l.replace(/^L_/, '')}`); }
     },
     syncHistory() {
-      const H = MR.history;
+      const H = history;
       $('btn-undo').disabled = !H.past.length;
       $('btn-redo').disabled = !H.future.length;
       $('btn-undo').textContent = `↶ UNDO${H.past.length ? ' ' + H.past.length : ''}`;
@@ -459,9 +469,9 @@
 
     // ------------------------------------------------------------ layer
     buildLayer() {
-      const S = MR.stack;
+      const S = stack;
       const P = () => S.sel;
-      const E = MR.engine;
+      const E = engine;
       const restructure = () => { const p = P(); p.overrides.clear(); p.fxOverrides.clear(); p.generate(); E.retime(p, 'align'); };
       const rhythm = [
         { key: 'steps', label: 'STEPS', min: 0, max: S.STEP_CHOICES.length - 1, step: 1,
@@ -499,7 +509,7 @@
       this.layerDefs = rhythm.concat(frag);
       const mk = (parent, d) => {
         this.sliders['L_' + d.key] = slider(parent, Object.assign({}, d, {
-          onStart: () => { MR.history.push(`L_${d.key}·${P().name}`, true); this.activeSlot = null; this.syncKeep(); },
+          onStart: () => { history.push(`L_${d.key}·${P().name}`, true); this.activeSlot = null; this.syncKeep(); },
           onInput: (v) => { d.apply(v); this.syncLayerButtons(); },
         }));
       };
@@ -510,31 +520,31 @@
         { label: 'DIVIDE', value: 'divide', title: 'equal slices (see SLICES)' },
         { label: 'TRANSIENT', value: 'transient', title: 'fragments start at detected attacks' },
         { label: 'RANDOM', value: 'random', title: 'a cut mode picked per sound' },
-      ], (v) => { MR.history.push('cut'); P().cut = v; this.syncLayerButtons(); });
+      ], (v) => { history.push('cut'); P().cut = v; this.syncLayerButtons(); });
     },
 
     select(i) {
-      const S = MR.stack;
+      const S = stack;
       S.selected = mod(i, S.plates.length);
       this.syncLayer();
       this.renderPool();
     },
 
     syncLayer() {
-      const p = MR.stack.sel;
+      const p = stack.sel;
       for (const d of this.layerDefs) this.sliders['L_' + d.key].set(p[d.key]);
       this.syncOnBeatAll();
       this.syncLayerButtons();
     },
 
     syncOnBeatAll() {
-      const vals = MR.stack.plates.map((p) => p.onBeat);
+      const vals = stack.plates.map((p) => p.onBeat);
       const same = vals.every((v) => Math.abs(v - vals[0]) < 1e-6);
       this.sliders.onBeatAll.set(vals[0], !same);
     },
 
     syncLayerButtons() {
-      const p = MR.stack.sel;
+      const p = stack.sel;
       setOn($('btn-mute'), p.mute);
       setOn($('btn-solo'), p.solo);
       setOn($('btn-hold'), p.hold);
@@ -548,7 +558,7 @@
 
     // ------------------------------------------------------------ output
     buildOutput() {
-      const X = MR.exporter;
+      const X = exporter;
       this.lenSeg = seg($('len-row'), [1, 2, 4].map((n) => ({ label: `${n} PHRASE${n > 1 ? 'S' : ''}`, value: n })),
         (v) => { X.phrases = v; this.lenSeg.set(v); this.syncExport(); });
       this.loopSeg = seg($('loop-row'), [
@@ -587,15 +597,15 @@
       btns[1].addEventListener('click', () => run('stems'));
     },
     syncExport() {
-      const X = MR.exporter;
-      $('export-status').textContent = `${X.phrases * MR.stack.phraseBars} bars · ${X.seconds().toFixed(1)} s · what PLAY plays, from bar 1 · 24-bit 48 kHz`;
+      const X = exporter;
+      $('export-status').textContent = `${X.phrases * stack.phraseBars} bars · ${X.seconds().toFixed(1)} s · what PLAY plays, from bar 1 · 24-bit 48 kHz`;
     },
 
     // ------------------------------------------------------------ meters
     buildMeters() {
       const m = $('meters');
       m.innerHTML = '';
-      this.meterEls = MR.stack.plates.map((p, i) => {
+      this.meterEls = stack.plates.map((p, i) => {
         // a row: the level (click = select the plate) and its own mute toggle
         const row = document.createElement('div');
         row.className = 'meter-row';
@@ -606,9 +616,9 @@
         mb.setAttribute('aria-label', `Mute ${p.name}`);
         setOn(mb, p.mute);
         mb.addEventListener('click', (e) => {
-          const pl = MR.stack.plates[i];
-          if (e.shiftKey) { MR.history.push('solo'); pl.solo = !pl.solo; this.toast(`${pl.name} ${pl.solo ? 'solo' : 'solo off'}`); }
-          else { MR.history.push('mute'); pl.mute = !pl.mute; }
+          const pl = stack.plates[i];
+          if (e.shiftKey) { history.push('solo'); pl.solo = !pl.solo; this.toast(`${pl.name} ${pl.solo ? 'solo' : 'solo off'}`); }
+          else { history.push('mute'); pl.mute = !pl.mute; }
           this.syncLayerButtons();
           this.announce(`${pl.name} ${e.shiftKey ? (pl.solo ? 'solo on' : 'solo off') : (pl.mute ? 'muted' : 'unmuted')}`);
         });
@@ -625,13 +635,13 @@
 
     // ------------------------------------------------------------ buttons
     bindButtons() {
-      const E = MR.engine, S = MR.stack;
+      const E = engine, S = stack;
       $('btn-play').addEventListener('click', () => this.togglePlay());
       $('btn-mode').addEventListener('click', () => this.toggleMode());
       $('btn-orbit').addEventListener('click', () => this.toggleOrbit());
       setOn($('btn-ear'), E.earMode === 'camera');
-      setOn($('btn-orbit'), MR.view.autoOrbit);
-      setOn($('btn-sensor-chance'), MR.flight.useChance);
+      setOn($('btn-orbit'), view.autoOrbit);
+      setOn($('btn-sensor-chance'), flight.useChance);
       setOn($('btn-autopilot'), true); setOn($('dock-auto'), true);
       $('btn-ear').addEventListener('click', (e) => {
         E.earMode = E.earMode === 'camera' ? 'fixed' : 'camera';
@@ -645,10 +655,10 @@
       });
       $('btn-regen-all').addEventListener('click', () => { this.act('regen all', () => S.regenerateAll()); this.toast('regenerated plates not on hold'); });
       $('btn-hold').addEventListener('click', () => this.toggleHold());
-      $('btn-mute').addEventListener('click', () => { MR.history.push('mute'); S.sel.mute = !S.sel.mute; this.syncLayerButtons(); });
-      $('btn-solo').addEventListener('click', () => { MR.history.push('solo'); S.sel.solo = !S.sel.solo; this.syncLayerButtons(); });
-      $('btn-choke').addEventListener('click', () => { MR.history.push('choke'); S.sel.choke = !S.sel.choke; this.syncLayerButtons(); });
-      $('btn-dir').addEventListener('click', () => { MR.history.push('dir'); S.sel.dir *= -1; S.sel.refresh(); E.retime(S.sel, 'align'); this.syncLayerButtons(); });
+      $('btn-mute').addEventListener('click', () => { history.push('mute'); S.sel.mute = !S.sel.mute; this.syncLayerButtons(); });
+      $('btn-solo').addEventListener('click', () => { history.push('solo'); S.sel.solo = !S.sel.solo; this.syncLayerButtons(); });
+      $('btn-choke').addEventListener('click', () => { history.push('choke'); S.sel.choke = !S.sel.choke; this.syncLayerButtons(); });
+      $('btn-dir').addEventListener('click', () => { history.push('dir'); S.sel.dir *= -1; S.sel.refresh(); E.retime(S.sel, 'align'); this.syncLayerButtons(); });
       $('btn-regen').addEventListener('click', () => this.act(`regen ${S.sel.name}`, () => S.regenerate(S.sel)));
       $('btn-mutate').addEventListener('click', () => this.act(`draw ${S.sel.name} · ${S.style}`, () => S.draw(S.sel, S.style)));
       $('sel-prev').addEventListener('click', () => this.select(S.selected - 1));
@@ -656,12 +666,12 @@
       $('panel-toggle').addEventListener('click', () => this.setPanelHidden(!document.body.classList.contains('panel-hidden')));
       $('btn-builtins').addEventListener('click', () => {
         // the button reflects the list: on if any built-in is enabled
-        const on = !MR.sounds.list.some((s) => s.builtin && s.enabled);
-        MR.sounds.setAllBuiltins(on);
+        const on = !sounds.list.some((s) => s.builtin && s.enabled);
+        sounds.setAllBuiltins(on);
       });
       $('btn-save-project').addEventListener('click', () => {
         try {
-          const r = MR.project.save();
+          const r = project.save();
           const msg = `saved ${r.name} · ${(r.bytes / 1024 / 1024).toFixed(1)} MB`;
           $('export-status').textContent = msg;
           this.toast(msg);
@@ -674,7 +684,7 @@
         pin.value = '';
         if (!f) return;
         try {
-          await MR.project.open(f);
+          await project.open(f);
           this.toast(`opened ${f.name} — press play`);
           this.announce(`opened ${f.name}`);
         } catch (err) { this.toast(`could not open ${f.name}: ${err.message}`); console.warn(err); }
@@ -688,7 +698,7 @@
     },
 
     toggleHold() {
-      const p = MR.stack.sel;
+      const p = stack.sel;
       p.hold = !p.hold;
       this.syncLayerButtons();
       this.toast(`${p.name} ${p.hold ? 'on hold — kept through new phrases' : 'released'}`);
@@ -696,7 +706,7 @@
 
     /** Refresh every control from state (after opening a project). */
     syncAll() {
-      const E = MR.engine, S = MR.stack, V = MR.view, F = MR.flight, X = MR.exporter;
+      const E = engine, S = stack, V = view, F = flight, X = exporter;
       this.sliders.bpm.set(E.bpm); this.sliders.master.set(E.masterLevel); this.sliders.space.set(E.spaceLevel);
       this.sliders.sep.set(V.sepTarget); this.sliders.evolve.set(E.evolveAmount);
       this.sliders.sensorR.set(F.R); this.sliders.sensorGain.set(F.sensorGain); this.sliders.headMix.set(F.headMix);
@@ -723,7 +733,7 @@
     },
 
     async togglePlay() {
-      const E = MR.engine;
+      const E = engine;
       if (E.playing) E.stop(); else await E.start();
       $('btn-play').textContent = E.playing ? '■ STOP' : '▶ PLAY';
       setOn($('btn-play'), E.playing);
@@ -734,16 +744,16 @@
     },
 
     toggleMode() {
-      const V = MR.view;
+      const V = view;
       V.mode = V.mode === 'ORBIT' ? 'SPLIT' : 'ORBIT';
       V.sepTarget = V.mode === 'SPLIT' ? 1.85 : 1.25;
       this.sliders.sep.set(V.sepTarget);
       $('btn-mode').textContent = V.mode === 'ORBIT' ? 'SPLIT' : 'ORBIT';
-      $('hud-mode').textContent = MR.flight.on ? 'FLIGHT' : V.mode;
+      $('hud-mode').textContent = flight.on ? 'FLIGHT' : V.mode;
     },
 
     toggleOrbit() {
-      const V = MR.view;
+      const V = view;
       V.autoOrbit = !V.autoOrbit;
       setOn($('btn-orbit'), V.autoOrbit);
     },
@@ -777,7 +787,7 @@
         starting = true;
         mic.textContent = '… ALLOW MIC';
         try {
-          rec = await MR.engine.recordMic(20, (buf) => {
+          rec = await engine.recordMic(20, (buf) => {
             clearInterval(recTimer);
             rec = null;
             mic.classList.remove('rec');
@@ -800,12 +810,12 @@
       let capturing = false;
       rs.addEventListener('click', () => {
         if (capturing) return; // one capture at a time
-        if (!MR.engine.playing) { this.toast('press play first — resample captures the output'); return; }
+        if (!engine.playing) { this.toast('press play first — resample captures the output'); return; }
         capturing = true;
         rs.classList.add('rec');
         rs.textContent = '⟲ CAPTURING…';
         rs.setAttribute('aria-busy', 'true');
-        MR.engine.resample(4, (buf) => {
+        engine.resample(4, (buf) => {
           capturing = false;
           rs.classList.remove('rec');
           rs.textContent = '⟲ RESAMPLE 4s';
@@ -817,7 +827,7 @@
 
     addBuffer(name, buf) {
       try {
-        const snd = MR.sounds.addUser(name, buf);
+        const snd = sounds.addUser(name, buf);
         this.toast(`${snd.name} added → all plates`);
       } catch (err) {
         this.toast(`could not use recording: ${err.message}`);
@@ -827,7 +837,7 @@
     async addFiles(files) {
       for (const f of Array.from(files || [])) {
         try {
-          const snd = await MR.sounds.addFile(f);
+          const snd = await sounds.addFile(f);
           this.toast(`${snd.name} (${snd.buffer.duration.toFixed(1)}s · ${snd.onsets.length} onsets) → all plates`);
         } catch (err) {
           const silent = /silent/.test((err && err.message) || '');
@@ -840,7 +850,7 @@
     renderSounds() {
       const ul = $('sound-list');
       ul.innerHTML = '';
-      const list = MR.sounds.list;
+      const list = sounds.list;
       $('snd-count').textContent = `${list.length} · ${list.filter((s) => !s.builtin).length} YOURS`;
       const sorted = list.slice().sort((a, b) => (a.builtin === b.builtin ? b.id - a.id : a.builtin ? 1 : -1));
       const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -851,7 +861,7 @@
         chk.setAttribute('aria-checked', s.enabled ? 'true' : 'false');
         chk.setAttribute('aria-label', s.name);
         chk.title = 'Enable / disable';
-        chk.addEventListener('click', () => MR.sounds.setEnabled(s.id, !s.enabled));
+        chk.addEventListener('click', () => sounds.setEnabled(s.id, !s.enabled));
         const nm = el('span', 'nm', s.name);
         nm.title = s.name;
         nm.appendChild(el('small', null, `${s.buffer.duration.toFixed(1)}s`));
@@ -868,7 +878,7 @@
           const rm = el('button', 'rm', '×');
           rm.title = 'Remove';
           rm.setAttribute('aria-label', `Remove ${s.name}`);
-          rm.addEventListener('click', () => MR.sounds.remove(s.id));
+          rm.addEventListener('click', () => sounds.remove(s.id));
           acts.appendChild(rm);
         }
         li.append(chk, nm, cv, acts);
@@ -879,13 +889,13 @@
     },
 
     preview(s) {
-      const ctx = MR.engine.ensureCtx();
+      const ctx = engine.ensureCtx();
       ctx.resume();
       const src = ctx.createBufferSource();
       src.buffer = s.buffer;
       const g = ctx.createGain();
       g.gain.value = 0.6;
-      src.connect(g).connect(MR.engine.master);
+      src.connect(g).connect(engine.master);
       src.start();
       src.stop(ctx.currentTime + Math.min(4, s.buffer.duration));
     },
@@ -894,22 +904,22 @@
       const box = $('pool');
       if (!box) return;
       box.innerHTML = '';
-      const p = MR.stack.sel;
-      for (const s of MR.sounds.list) {
+      const p = stack.sel;
+      for (const s of sounds.list) {
         const b = document.createElement('button');
         const inPool = p.sourceIds.has(s.id);
         b.textContent = (s.builtin ? '' : '◆ ') + s.name;
         setOn(b, inPool);
         if (!s.enabled) { b.classList.add('off'); b.setAttribute('aria-description', 'sound disabled'); }
         b.title = inPool ? 'Remove from this plate' : 'Sample this sound on this plate';
-        b.addEventListener('click', () => { MR.history.push('pool'); MR.sounds.togglePlateSource(p, s.id); });
+        b.addEventListener('click', () => { history.push('pool'); sounds.togglePlateSource(p, s.id); });
         box.appendChild(b);
       }
     },
 
     // ------------------------------------------------------------ pointer
     bindPointer() {
-      const cv = $('stage'), V = MR.view;
+      const cv = $('stage'), V = view;
       let down = null;
       cv.addEventListener('pointerdown', (e) => {
         down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: V.dragYaw, pitch: V.dragPitch, moved: false };
@@ -919,8 +929,8 @@
         if (down) {
           const dx = e.clientX - down.x, dy = e.clientY - down.y;
           if (Math.abs(dx) + Math.abs(dy) > 4) { down.moved = true; cv.classList.add('dragging'); }
-          if (MR.flight.on) {
-            MR.flight.look((e.clientX - down.lx) * 0.004, -(e.clientY - down.ly) * 0.004);
+          if (flight.on) {
+            flight.look((e.clientX - down.lx) * 0.004, -(e.clientY - down.ly) * 0.004);
             down.lx = e.clientX; down.ly = e.clientY;
             return;
           }
@@ -928,7 +938,7 @@
           V.dragPitch = down.pitch + dy * 0.004;
           return;
         }
-        const hit = V.pick(e.clientX, e.clientY, MR.engine.visualTime(), MR.engine.playing);
+        const hit = V.pick(e.clientX, e.clientY, engine.visualTime(), engine.playing);
         V.hover = hit && hit.chip ? { plate: hit.plate, chip: hit.chip } : null;
         V.hoverHit = hit;
         cv.classList.toggle('pointing', !!hit);
@@ -937,14 +947,14 @@
         if (!down) return;
         cv.classList.remove('dragging');
         if (!down.moved) {
-          const hit = V.pick(e.clientX, e.clientY, MR.engine.visualTime(), MR.engine.playing);
+          const hit = V.pick(e.clientX, e.clientY, engine.visualTime(), engine.playing);
           if (hit) {
             if (e.altKey && hit.chip) {
-              MR.history.push('chip fx');
+              history.push('chip fx');
               const fx = hit.plate.cycleFx(hit.chip);
               this.toast(`${hit.plate.name} · T${hit.track} S${hit.sector} → ${fx || 'no fx'}`);
             } else if (e.shiftKey && hit.inAnnulus) {
-              MR.history.push('chip');
+              history.push('chip');
               const on = hit.plate.toggleCell(hit.track, hit.sector);
               this.toast(`${hit.plate.name} · chip ${on ? 'added' : 'removed'} at T${hit.track} S${hit.sector}`);
             }
@@ -958,18 +968,18 @@
       cv.addEventListener('pointerleave', () => { if (!down) V.hover = null; });
       cv.addEventListener('wheel', (e) => {
         e.preventDefault();
-        if (MR.flight.on) {
-          MR.flight.R = clamp(MR.flight.R * Math.exp(-e.deltaY * 0.001), 0.06, 0.8);
-          this.sliders.sensorR.set(MR.flight.R);
+        if (flight.on) {
+          flight.R = clamp(flight.R * Math.exp(-e.deltaY * 0.001), 0.06, 0.8);
+          this.sliders.sensorR.set(flight.R);
           return;
         }
         V.zoom = clamp(V.zoom * Math.exp(e.deltaY * 0.001), 0.45, 2.2);
       }, { passive: false });
-      cv.addEventListener('dblclick', () => { if (!MR.flight.on) { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; } });
+      cv.addEventListener('dblclick', () => { if (!flight.on) { V.dragYaw = 0; V.dragPitch = 0; V.zoom = 1; } });
     },
 
     bindKeys() {
-      const S = MR.stack;
+      const S = stack;
       window.addEventListener('keydown', (e) => {
         if (e.defaultPrevented) return; // a control already handled this key
         const tag = e.target.tagName;
@@ -977,7 +987,7 @@
         const TEXT = ['text', 'search', 'email', 'number', 'password', 'url', 'tel'];
         if ((tag === 'INPUT' && TEXT.includes(e.target.type)) || tag === 'SELECT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
         const k = e.key;
-        const F = MR.flight;
+        const F = flight;
         const mod = e.metaKey || e.ctrlKey || e.altKey;
         if (mod) F.keys.clear(); // macOS drops letter keyups while ⌘ is held: never leave thrust stuck
         // flight controls match physical keys (e.code) so any keyboard layout works
@@ -1025,7 +1035,7 @@
         else if (letter === 'o') this.toggleOrbit();
         else if (letter === 'p') this.setPanelHidden(!document.body.classList.contains('panel-hidden'));
         else if (letter === 'r') { if (sh) { this.act('regen all', () => S.regenerateAll()); this.toast('regenerated plates not on hold'); } else this.act(`regen ${S.sel.name}`, () => S.regenerate(S.sel)); }
-        else if (letter === 'm') { if (sh) { this.act('mutate all', () => S.mutateAll()); this.toast('new generation'); } else { MR.history.push('mute'); S.sel.mute = !S.sel.mute; this.syncLayerButtons(); } }
+        else if (letter === 'm') { if (sh) { this.act('mutate all', () => S.mutateAll()); this.toast('new generation'); } else { history.push('mute'); S.sel.mute = !S.sel.mute; this.syncLayerButtons(); } }
         else if (k === 'ArrowLeft' && e.target === document.body) this.select(S.selected - 1);
         else if (k === 'ArrowRight' && e.target === document.body) this.select(S.selected + 1);
         else if (/^Digit[1-9]$/.test(code) && +code.slice(5) <= S.plates.length) this.select(+code.slice(5) - 1);
@@ -1036,7 +1046,7 @@
      *  (PageUp/PageDown change plate), Enter toggles a chip, Shift+Enter cycles its FX,
      *  [ ] orbit, - = zoom, 0 resets the view. In flight, arrows look around. */
     bindStageKeys() {
-      const cv = $('stage'), V = MR.view, S = MR.stack;
+      const cv = $('stage'), V = view, S = stack;
       const sync = (say) => {
         const p = S.sel, c = this.cell;
         c.track = clamp(c.track, 0, p.tracks - 1);
@@ -1050,7 +1060,7 @@
       cv.addEventListener('blur', () => { V.cursorCell = null; V.hover = null; });
       cv.addEventListener('keydown', (e) => {
         if (e.metaKey || e.ctrlKey || e.altKey) return;
-        const F = MR.flight, c = this.cell;
+        const F = flight, c = this.cell;
         let handled = true;
         if (F.on && e.key.startsWith('Arrow')) {
           const d = 0.06;
@@ -1067,9 +1077,9 @@
           const p = S.sel;
           const chip = p.chips.find((x) => x.key === c.track * p.steps + c.sector);
           if (e.shiftKey) {
-            if (chip) { MR.history.push('chip fx'); const fx = p.cycleFx(chip); this.announce(`FX ${fx || 'none'}`); this.toast(`${p.name} · T${c.track} S${c.sector} → ${fx || 'no fx'}`); }
+            if (chip) { history.push('chip fx'); const fx = p.cycleFx(chip); this.announce(`FX ${fx || 'none'}`); this.toast(`${p.name} · T${c.track} S${c.sector} → ${fx || 'no fx'}`); }
           } else {
-            MR.history.push('chip');
+            history.push('chip');
             const on = p.toggleCell(c.track, c.sector);
             this.toast(`${p.name} · chip ${on ? 'added' : 'removed'} at T${c.track} S${c.sector}`);
             this.announce(`chip ${on ? 'added' : 'removed'}`);
@@ -1088,7 +1098,7 @@
     },
 
     bindFlightKeys() {
-      const F = MR.flight;
+      const F = flight;
       window.addEventListener('keyup', (e) => {
         const code = e.code || '';
         if (code.startsWith('Key')) F.keys.delete(code.slice(3).toLowerCase());
@@ -1100,7 +1110,7 @@
 
     // ------------------------------------------------------------ per-frame HUD
     updateHud(tv) {
-      const V = MR.view, E = MR.engine, S = MR.stack;
+      const V = view, E = engine, S = stack;
       const B = E.songBeat(tv);
       const bar = Math.floor(B / 4), beat = Math.floor(B % 4) + 1;
       const inPh = (bar % S.phraseBars) + 1, phrase = Math.floor(bar / S.phraseBars) + 1;
@@ -1118,7 +1128,7 @@
         `<span class="k">CUT</span> ${p.cut}${p.choke ? ' · CHOKE' : ''} <span class="k">STYLE</span> ${S.style}`,
         `<span class="k">TRIG</span> ${pad(E.stats.triggers, 6)}`,
       ];
-      const F = MR.flight;
+      const F = flight;
       if (F.on) {
         const n = F.near;
         const P = F.polar(F.pos, 0);
@@ -1139,7 +1149,7 @@
       const h = V.hover;
       if (h) {
         const c = h.chip, pl = h.plate;
-        const pool = MR.sounds.poolFor(pl);
+        const pool = sounds.poolFor(pl);
         const snd = pool.length ? pool[c.srcPick % pool.length] : null;
         const f = snd ? pl.fragmentFor(c, snd) : null;
         rows = rows.concat([
@@ -1187,8 +1197,8 @@
       this.mapFrame = (this.mapFrame || 0) + 1;
       if (!this.mapCssW || this.mapFrame % 30 === 0) this.mapCssW = cv.clientWidth;
       if (!this.mapCssW) return;
-      const p = MR.stack.sel, E = MR.engine;
-      const pool = MR.sounds.poolFor(p);
+      const p = stack.sel, E = engine;
+      const pool = sounds.poolFor(p);
       const rows = Math.min(pool.length, 6);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const rowH = 24;
@@ -1247,7 +1257,7 @@
         const len = s.buffer.duration;
         const x = f.offset / len * W, w = Math.max(1.5 * dpr, f.srcDur / len * W);
         const k = E.playing && c.lastFire <= tv ? Math.exp(-(tv - c.lastFire) / 0.15) : 0;
-        const hover = MR.view.hover && MR.view.hover.chip === c;
+        const hover = view.hover && view.hover.chip === c;
         const y = r * rh + rh * 0.3, hh = rh * 0.42;
         g.fillStyle = `rgba(240,244,246,${hover ? 1 : 0.18 + 0.8 * k})`;
         g.fillRect(x, y, w, hh);
@@ -1280,5 +1290,5 @@
     });
   }
 
-  MR.ui = ui;
-})(window.MR);
+  registerUi(ui);
+export { ui };
