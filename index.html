@@ -11,10 +11,14 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <canvas id="stage" aria-label="Orbital stack of rotating sound plates"></canvas>
+  <main>
+  <h1 class="sr-only">Orbital Stack — micro-rhythm machine</h1>
+  <canvas id="stage" tabindex="0" role="application" aria-roledescription="rhythm stack"
+    aria-label="Orbital stack. Arrow keys move a cell cursor on the selected plate, Page Up and Page Down change plate, Enter adds or removes a chip, Shift+Enter cycles its FX, square brackets orbit, minus and equals zoom, 0 resets the view. In flight, arrows look around."
+    aria-describedby="hud-tr"></canvas>
 
   <!-- HUD overlay -->
-  <div id="hud" aria-hidden="false">
+  <div id="hud">
     <div class="hud-tl">
       <div class="hud-brand">MICRO <span class="sep">·</span> RHYTHM</div>
       <div class="hud-sub">◦ GEN <span class="sep">·</span> ORBITAL STACK <span class="sep">·</span> VIEW <span id="hud-view">07</span></div>
@@ -26,9 +30,9 @@
     <div class="hud-hint" id="hud-hint">SPACE / ▶ TO SPIN THE STACK · F TO FLY THROUGH IT · DROP AUDIO ANYWHERE TO SAMPLE IT</div>
   </div>
 
-  <button id="panel-toggle" class="ghost" title="Toggle panel (P)">≡ PANEL</button>
+  <button id="panel-toggle" class="ghost" title="Toggle panel (P)" aria-controls="panel" aria-expanded="true">≡ PANEL</button>
 
-  <div id="fly-dock" aria-label="Flight controls">
+  <div id="fly-dock" role="toolbar" aria-label="Flight controls">
     <button id="dock-fly" class="ghost" title="Fly / land (F)">✈ FLY</button>
     <span class="dock-flight">
       <button id="dock-auto" class="ghost on" title="Autopilot / manual (C)">AUTOPILOT</button>
@@ -37,10 +41,11 @@
       <button id="dock-brake" class="ghost" title="Hold: brake (X)">■ BRAKE</button>
     </span>
   </div>
+  </main>
 
-  <aside id="panel">
+  <aside id="panel" aria-label="Controls">
     <section class="block">
-      <header>TRANSPORT</header>
+      <header><h2>TRANSPORT</h2></header>
       <div class="row">
         <button id="btn-play" class="primary">▶ PLAY</button>
         <button id="btn-mode" title="Toggle ORBIT / SPLIT (S)">SPLIT</button>
@@ -54,18 +59,19 @@
     </section>
 
     <section class="block" id="flight-block">
-      <header>FLIGHT <span class="dim" id="flight-readout"></span></header>
+      <header><h2>FLIGHT</h2> <span class="dim" id="flight-readout"></span></header>
       <div class="row">
         <button id="btn-fly" class="primary" title="Fly through the plates (F) — your position becomes a read head">✈ FLY</button>
         <button id="btn-autopilot" class="on" title="Cruise the field on a fixed path (C)">AUTOPILOT</button>
         <button id="btn-sensor-chance" title="Sensor hits: every chip you pass, or roll each plate's CHANCE">PASS: ALL</button>
+        <button id="btn-flight-restart" title="Start the flight path again at the first plate (take-off otherwise resumes where you landed)">↺ RESTART PATH</button>
       </div>
       <div id="flight-sliders"></div>
-      <p class="hint">W/S thrust · A/D strafe · Q/E down/up · ⇧ boost · X brake · drag to look · wheel = sensor size · C autopilot · Esc lands. PROXIMITY sets how fast plates fade with distance from the ship. Chips that pass within the sensor sound; each sounds again Δθ/ω after the plate's head — fly toward the head to tighten the flam.</p>
+      <p class="hint">W/S thrust · A/D strafe · Q/E down/up · ⇧ boost · X brake · drag to look · wheel = sensor size · C autopilot · Esc lands · with the stack focused, arrows look around. PROXIMITY sets how fast plates fade with distance from the ship. Chips that pass within the sensor sound; each sounds again Δθ/ω after the plate's head — fly toward the head to tighten the flam.</p>
     </section>
 
     <section class="block">
-      <header>COMPOSE <span class="dim" id="pos-readout"></span></header>
+      <header><h2>COMPOSE</h2> <span class="dim" id="pos-readout"></span></header>
       <div class="row">
         <button id="btn-new-phrase" class="primary" title="Draw a new phrase for every plate not on hold (N). Shift-click or hold: at the next phrase line.">NEW PHRASE</button>
       </div>
@@ -73,7 +79,7 @@
       <div class="row keeps" id="keep-row">
         <button id="btn-keep" title="Keep the phrase you hear in the next free slot (K)">KEEP</button>
       </div>
-      <p class="hint">slot: tap = switch at next bar · hold = at next phrase · × releases</p>
+      <p class="hint">slot: click / Enter = switch at the next bar · shift-click, Shift+Enter or hold = next phrase · × or Delete releases</p>
       <div id="compose-sliders"></div>
       <div class="row">
         <button id="btn-undo" title="Undo (⌘/Ctrl-Z)">↶ UNDO</button>
@@ -89,7 +95,7 @@
     <section class="block" id="layer-block">
       <header>
         <button class="ghost tiny" id="sel-prev" aria-label="Previous layer">◀</button>
-        <span id="sel-name">LAYER</span>
+        <h2 id="sel-name">LAYER</h2>
         <button class="ghost tiny" id="sel-next" aria-label="Next layer">▶</button>
       </header>
       <div class="row">
@@ -107,18 +113,18 @@
       <div id="frag-sliders"></div>
       <div class="row"><button id="btn-choke" title="Each new grain cuts the previous one on this plate">CHOKE</button></div>
       <div class="sub-head">MAP <span class="dim">— every chip's fragment, flashing as it plays</span></div>
-      <canvas id="map" class="map" height="150"></canvas>
+      <canvas id="map" class="map" height="150" aria-hidden="true"></canvas>
       <div class="pool-head">SAMPLES FROM <span class="dim">(none selected = all)</span></div>
       <div id="pool" class="pool"></div>
     </section>
 
     <section class="block">
-      <header>SOUNDS <span class="dim" id="snd-count"></span></header>
-      <label id="dropzone" class="dropzone" tabindex="0">
-        <input type="file" id="file-input" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.aif,.aiff" multiple>
-        <span>＋ ADD SOUNDS</span>
+      <header><h2>SOUNDS</h2> <span class="dim" id="snd-count"></span></header>
+      <div id="dropzone" class="dropzone">
+        <button id="btn-add-sounds" class="add" type="button">＋ ADD SOUNDS</button>
         <small>click or drop audio files · they feed every plate</small>
-      </label>
+      </div>
+      <input type="file" id="file-input" hidden accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac,.aif,.aiff" multiple>
       <div class="row">
         <button id="btn-mic" title="Record from microphone (max 20 s)">● REC MIC</button>
         <button id="btn-resample" title="Capture 4 s of the machine itself as a new sound">⟲ RESAMPLE 4s</button>
@@ -127,27 +133,36 @@
       <ul id="sound-list" class="sound-list"></ul>
     </section>
 
-    <section class="block">
-      <header>OUTPUT</header>
+    <section class="block" id="output-block">
+      <header><h2>OUTPUT</h2></header>
       <div class="row seg" id="len-row"></div>
       <div class="row seg" id="loop-row"></div>
       <div class="row">
         <button id="btn-export-wav" title="Render the mix from bar 1 (offline, seeded)">⤓ EXPORT WAV</button>
         <button id="btn-export-stems" title="One WAV per audible plate, zipped">⤓ STEMS .ZIP</button>
       </div>
-      <p class="hint" id="export-status">renders what PLAY plays, from bar 1 · 24-bit 48 kHz</p>
+      <p class="hint" id="export-status" role="status">renders what PLAY plays, from bar 1 · 24-bit 48 kHz</p>
+      <div class="sub-head">PROJECT</div>
+      <div class="row">
+        <button id="btn-save-project" title="Download the whole machine as a .json file: settings, plates, keep slots, flight and your sounds">⤓ SAVE .JSON</button>
+        <button id="btn-open-project" title="Open a saved .json project (replaces the current machine)">⤒ OPEN .JSON</button>
+      </div>
+      <input type="file" id="project-input" hidden accept=".json,application/json">
       <p class="hint" id="export-flight-note" hidden>in flight, exports render what the ship hears from bar 1: sensor hits, proximity and your position — on autopilot, the path carries on exactly as it will after PLAY</p>
     </section>
 
     <section class="block help">
-      <header>HANDLING</header>
+      <header><h2>HANDLING</h2></header>
       <p>Drag to orbit · wheel to zoom · click a plate to select · <b>shift-click</b> a cell to add/remove a chip · <b>alt-click</b> a chip to cycle its FX · hover a chip to inspect its fragment.</p>
-      <p>Keys: <b>F</b> fly · <b>space</b> play · <b>N</b> new phrase (<b>⇧N</b> at phrase end) · <b>K</b> keep · <b>⌘Z</b> undo · <b>H</b> hold · <b>S</b> split · <b>O</b> orbit · <b>R</b> regen · <b>M</b> mute · <b>1–7</b> select · <b>P</b> panel</p>
+      <p>Keyboard: <b>Tab</b> to the stack, then <b>arrows</b> move a cell cursor (<b>PgUp/PgDn</b> change plate), <b>Enter</b> adds/removes a chip, <b>⇧Enter</b> cycles its FX, <b>[ ]</b> orbit, <b>− =</b> zoom, <b>0</b> resets the view.</p>
+      <p>Keys: <b>F</b> fly · <b>space</b> play · <b>N</b> new phrase (<b>⇧N</b> at phrase end) · <b>K</b> keep · <b>⌘Z</b> undo · <b>H</b> hold · <b>S</b> split · <b>O</b> orbit · <b>R</b> regen (<b>⇧R</b> all) · <b>M</b> mute (<b>⇧M</b> mutate all) · <b>1–7</b> select · <b>P</b> panel</p>
+      <div class="row"><button id="btn-shortcuts" class="on" title="Turn single-letter shortcuts off (they then work only while the stack has focus)">SINGLE-KEY SHORTCUTS: ON</button></div>
     </section>
   </aside>
 
   <div id="drop-veil"><div>DROP AUDIO TO SAMPLE</div></div>
   <div id="toast" role="status" aria-live="polite"></div>
+  <div id="sr-live" class="sr-only" role="status" aria-live="polite"></div>
 
   <script src="js/util.js"></script>
   <script src="js/stack.js"></script>
@@ -155,6 +170,7 @@
   <script src="js/engine.js"></script>
   <script src="js/history.js"></script>
   <script src="js/export.js"></script>
+  <script src="js/project.js"></script>
   <script src="js/flight.js"></script>
   <script src="js/render.js"></script>
   <script src="js/ui.js"></script>

@@ -36,6 +36,10 @@
     lookYaw: 0, lookPitch: 0,     // free-look offset (drag) on top of autopilot heading
     fwdSmooth: [1, 0, 0],
     keys: new Set(),
+    saved: null,                  // flight state at the last landing (resumed on take-off)
+    hist: [],                     // since PLAY: [{t0, mode:'auto'|'manual', ap, blend}]
+    track: [],                    // since PLAY, manual flight samples [{t, pos, fwd, up}] (listener orientation)
+    knots: [],                    // since PLAY, the ship path the scheduler used [{t, pos}] (piecewise linear)
     tNow: 0,                      // clock time of the last update
     ap: { t0: 0, tau0: 0, speed: 1 },
     stats: { sensor: 0 },
@@ -53,7 +57,8 @@
      *  phase is frozen where playback stopped, and resumes from there on play. */
     tau(t) {
       if (this.paused()) return this.ap.tau0;
-      return this.ap.tau0 + this.ap.speed * (t - this.ap.t0);
+      const ap = this.prevAp && t < this.ap.t0 ? this.prevAp : this.ap;
+      return ap.tau0 + ap.speed * (t - ap.t0);
     },
     paused() { return this.on && !MR.engine.playing; },
     PERIOD: 110,       // seconds for one ping-pong along the stack (at SPEED ×1)
@@ -77,14 +82,115 @@
       return ps[ps.length - 1];
     },
     /** Autopilot position, eased in from where the ship was when autopilot engaged. */
-    apPos(t) {
-      const raw = this.pathPos(t);
-      const b = this.blend;
+    apPos(t) { return this.ease(this.pathPos(t), this.blend, t); },
+    ease(raw, b, t) {
       if (!b) return raw;
       const f = clamp((t - b.t0) / b.dur, 0, 1);
       if (f >= 1) return raw;
       const s = f * f * (3 - 2 * f);
       return lerp3(b.from, raw, s);
+    },
+    /** Autopilot position under a recorded anchor (for replaying the flight). */
+    apPosWith(seg, t) {
+      return this.ease(this.pathAtTau(seg.ap.tau0 + seg.ap.speed * (t - seg.ap.t0)), seg.blend, t);
+    },
+
+    // ------------------------------------------------------------ flight history
+    histStart() {
+      const t = this.clock();
+      this.hist = [{ t0: t, mode: this.autopilot ? 'auto' : 'manual', ap: Object.assign({}, this.ap), blend: this.copyBlend() }];
+      this.track = [];
+      this.knots = [];
+      if (!this.autopilot) this.recordSample(t);
+    },
+    copyBlend() { return this.blend ? { from: this.blend.from.slice(), t0: this.blend.t0, dur: this.blend.dur } : null; },
+    /** Record a change in how the ship flies. Dated at the scheduling horizon: the
+     *  live scheduler has already scheduled up to there with the previous mode. */
+    histPush(mode) {
+      if (!this.on || !MR.engine.playing) return;
+      this.hist.push({ t0: MR.engine.horizon(), mode, ap: Object.assign({}, this.ap), blend: this.copyBlend() });
+    },
+    recordSample(t) {
+      const pose = this.pose();
+      const tr = this.track;
+      if (tr.length && t <= tr[tr.length - 1].t) return;
+      tr.push({ t, pos: this.pos.slice(), fwd: pose.fwd, up: pose.up });
+      if (tr.length > 200000) tr.splice(0, tr.length - 200000);
+    },
+    histAt(t) {
+      const h = this.hist;
+      for (let i = h.length - 1; i >= 0; i--) if (h[i].t0 <= t) return h[i];
+      return h[0];
+    },
+    /** Live: decide the ship's path over a scheduling window (linear between its ends,
+     *  each end predicted once and shared with the neighbouring window) and record it. */
+    prepareWindow(E, Ba, Bb) {
+      const ta = E.timeAtBeat(Ba), tb = E.timeAtBeat(Bb);
+      const cur = E.sensorCursor;
+      const posA = cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : this.predict(ta);
+      const posB = this.predict(tb);
+      E.shipWin = { ta, tb, posA, posB };
+      E.sensorCursor = { t: tb, pos: posB };
+      const k = this.knots;
+      if (!k.length || k[k.length - 1].t < ta - 1e-9) k.push({ t: ta, pos: posA });
+      k.push({ t: tb, pos: posB });
+      if (k.length > 400000) k.splice(0, k.length - 400000);
+    },
+    /** Live ship position as the scheduler sees it. */
+    liveShipAt(t) {
+      const w = MR.engine.shipWin;
+      if (w && t >= w.ta - 1e-9 && t <= w.tb + 1e-9) {
+        const f = w.tb > w.ta ? (t - w.ta) / (w.tb - w.ta) : 0;
+        return lerp3(w.posA, w.posB, clamp(f, 0, 1));
+      }
+      return this.predict(t);
+    },
+    knotAt(t) {
+      const k = this.knots;
+      let lo = 0, hi = k.length - 1;
+      if (t <= k[0].t) return k[0].pos;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (k[mid].t <= t) lo = mid; else hi = mid; }
+      const a = k[lo], b = k[hi], f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
+      return lerp3(a.pos, b.pos, clamp(f, 0, 1));
+    },
+    /** Knot times strictly inside (ta, tb). */
+    knotsIn(ta, tb) {
+      const k = this.knots, out = [];
+      if (!k.length) return out;
+      let lo = 0, hi = k.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (k[mid].t <= ta) lo = mid + 1; else hi = mid; }
+      for (let i = lo; i < k.length && k[i].t < tb; i++) out.push(k[i].t);
+      return out;
+    },
+
+    /** Where the ship was at clock time t during this PLAY (future: as predicted). */
+    shipAtPlayed(t) {
+      // what the scheduler actually used, while it has been recorded
+      if (this.knots.length && t <= this.knots[this.knots.length - 1].t) return this.knotAt(t);
+      if (!this.hist.length) return this.predict(t);
+      const seg = this.histAt(t);
+      if (seg.mode === 'auto') return this.apPosWith(seg, t);
+      return this.sampleAt(t, seg).pos;
+    },
+    poseAtPlayed(t, frameAt) {
+      if (!this.hist.length) return frameAt(this.predict(t), this.predict(t + 0.6));
+      const seg = this.histAt(t);
+      if (seg.mode === 'auto') return frameAt(this.apPosWith(seg, t), this.apPosWith(seg, t + 0.6));
+      return this.sampleAt(t, seg);
+    },
+    sampleAt(t, seg) {
+      const tr = this.track;
+      const isLast = seg === this.hist[this.hist.length - 1];
+      if (!tr.length || t >= tr[tr.length - 1].t) {
+        const last = tr[tr.length - 1];
+        if (isLast && !this.autopilot) { const pose = this.pose(); return { pos: this.predict(t), fwd: pose.fwd, up: pose.up }; }
+        return last ? { pos: last.pos, fwd: last.fwd, up: last.up } : { pos: this.pos.slice(), fwd: this.pose().fwd, up: this.pose().up };
+      }
+      if (t <= tr[0].t) return { pos: tr[0].pos, fwd: tr[0].fwd, up: tr[0].up };
+      let lo = 0, hi = tr.length - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (tr[mid].t <= t) lo = mid; else hi = mid; }
+      const a = tr[lo], b = tr[hi], f = (t - a.t) / (b.t - a.t);
+      return { pos: lerp3(a.pos, b.pos, f), fwd: a.fwd, up: a.up };
     },
     pathPos(t) { return this.pathAtTau(this.tau(t)); },
     pathAtTau(tau) {
@@ -104,8 +210,12 @@
       return (this.PERIOD / TAU) * Math.acos(1 - 2 * u);
     },
     reanchor(speed) {
-      const t = this.clock();
-      this.ap = { t0: t, tau0: this.tau(t), speed };
+      // change speed from the scheduling horizon on (already-scheduled grains used the old one)
+      const t = MR.engine.playing ? MR.engine.horizon() : this.clock();
+      const tau0 = this.tau(t);
+      this.prevAp = Object.assign({}, this.ap);
+      this.ap = { t0: t, tau0, speed };
+      this.histPush('auto');
     },
 
     /** Ship position at clock time t (exact on autopilot, extrapolated by hand). */
@@ -116,18 +226,42 @@
     },
 
     // ------------------------------------------------------------ control
-    enter() {
+    /** Take off. Resumes where the ship was when it last landed (position, heading,
+     *  mode, autopilot phase) unless `fresh`, which starts the path at the first plate. */
+    enter(fresh = false) {
       this.on = true;
-      this.autopilot = true;
-      this.ap = { t0: this.clock(), tau0: this.startTau(), speed: this.thrust };
-      this.lastTau = this.ap.tau0;
+      this.prevAp = null;
       this.blend = null;
-      this.lookYaw = this.lookPitch = 0;
       this.cursor = null;
       this.keys.clear();
       const t = this.clock();
-      this.pos = this.apPos(t); // on the path immediately, not at the default spot until the next frame
-      this.fwdSmooth = this.pathHeading(t);
+      const s = fresh ? null : this.saved;
+      if (s) {
+        this.autopilot = s.autopilot;
+        this.ap = { t0: t, tau0: s.tau, speed: this.thrust };
+        this.lastTau = s.tau;
+        this.lookYaw = s.lookYaw; this.lookPitch = s.lookPitch;
+        this.yaw = s.yaw; this.pitch = s.pitch;
+        this.vel = [0, 0, 0];
+        this.fwdSmooth = s.fwd.slice();
+        this.pos = this.autopilot ? this.apPos(t) : s.pos.slice();
+        this.tNow = t;
+      } else {
+        this.autopilot = true;
+        this.ap = { t0: t, tau0: this.startTau(), speed: this.thrust };
+        this.lastTau = this.ap.tau0;
+        this.lookYaw = this.lookPitch = 0;
+        this.pos = this.apPos(t); // on the path immediately, not at the default spot until the next frame
+        this.fwdSmooth = this.pathHeading(t);
+      }
+      if (MR.engine.playing) this.histStart(); // taking off mid-play: record from here
+    },
+    /** Everything needed to pick the flight up again later (also saved in projects). */
+    flightState() {
+      // the path phase at the moment you're seeing, so take-off resumes exactly there
+      const t = MR.engine.playing ? MR.engine.visualTime() : this.clock();
+      return { pos: this.pos.slice(), autopilot: this.autopilot, tau: this.tau(t), yaw: this.yaw, pitch: this.pitch,
+        lookYaw: this.lookYaw, lookPitch: this.lookPitch, fwd: this.heading().slice() };
     },
     /** Heading along the path, with pitch flattened so turnarounds don't stare at the floor. */
     pathHeading(t) {
@@ -135,7 +269,10 @@
       const d = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
       return Math.hypot(d[0], d[1], d[2]) > 1e-5 ? norm(d) : this.fwdSmooth;
     },
-    exit() { this.on = false; this.keys.clear(); this.cursor = null; },
+    exit() {
+      if (this.on) this.saved = this.flightState(); // land: remember where we were
+      this.on = false; this.keys.clear(); this.cursor = null;
+    },
 
     /** Take the stick: keep the current pose and velocity. */
     takeManual() {
@@ -151,6 +288,8 @@
       this.autopilot = false;
       this.tNow = t;
       this.cursor = null;
+      this.histPush('manual');
+      if (MR.engine.playing) this.recordSample(t);
     },
     engageAutopilot() {
       if (this.autopilot) return;
@@ -162,10 +301,12 @@
       const up = (this.PERIOD / TAU) * Math.acos(1 - 2 * u);   // ascending half (+x)
       const tau0 = this.vel[0] < 0 ? this.PERIOD - up : up;     // descending half (−x)
       this.ap = { t0: t, tau0, speed: this.thrust };
+      this.prevAp = null;
       this.blend = { from: this.pos.slice(), t0: t, dur: 1.2 };
       this.fwdSmooth = this.heading();
       this.autopilot = true;
       this.cursor = null;
+      this.histPush('auto');
     },
     setThrust(v) {
       this.thrust = v;
@@ -192,9 +333,11 @@
     clockChanged() {
       const t = this.clock();
       this.ap = { t0: t, tau0: this.lastTau || 0, speed: this.ap.speed };
+      this.prevAp = null;
       if (this.blend) this.blend = null;
       this.tNow = t;
       this.cursor = null;
+      if (MR.engine.playing) this.histStart(); // a new PLAY: start recording the flight
     },
 
     /** Per frame: integrate manual physics on the clock, update the view pose. */
@@ -221,6 +364,7 @@
         for (let i = 0; i < 3; i++) this.vel[i] += (f[i] * ax + right[i] * st + up[i] * vt) * acc * dt;
         const damp = Math.exp(-(k.has('x') ? 9 : 1.4) * dt);
         for (let i = 0; i < 3; i++) { this.vel[i] *= damp; this.pos[i] += this.vel[i] * dt; }
+        if (MR.engine.playing) this.recordSample(t);
       }
       this.updateNear();
     },
@@ -257,7 +401,7 @@
 
     /** Live flight parameters for the engine. */
     liveCtx() {
-      return { shipAt: (t) => this.predict(t), headMix: this.headMix, falloff: this.falloff, R: this.R,
+      return { shipAt: (t) => this.liveShipAt(t), headMix: this.headMix, falloff: this.falloff, R: this.R,
         sensorGain: this.sensorGain, useChance: this.useChance };
     },
 
@@ -284,11 +428,21 @@
         const right = norm(cross(f, [0, 1, 0]));
         return { pos: a, fwd: f, up: cross(right, f) };
       };
+      if (E.playing) {
+        // this PLAY as it was flown: autopilot anchors and hand-flown samples, then the prediction
+        // offline time 0 is bar 1; the export replays the played tempo map, so offline
+        // time maps to live time by a fixed shift
+        const t0 = E.timeAtBeat(0);
+        const liveT = (tOff) => t0 + tOff;
+        const shipAt = (tOff) => this.shipAtPlayed(liveT(tOff));
+        const poseAt = (tOff) => this.poseAtPlayed(liveT(tOff), frameAt);
+        // the recorded path's corners, in export time, so the export splits windows there too
+        const knotsIn = (a, b) => this.knotsIn(t0 + a, t0 + b).map((t) => t - t0);
+        return Object.assign(base, { moving: true, shipAt, poseAt, knotsIn, where: 'as flown since PLAY', liveT });
+      }
       if (this.autopilot) {
         let shipAt;
-        if (E.playing) {
-          shipAt = (tOff) => this.apPos(E.timeAtBeat(tOff * bps));
-        } else {
+        {
           // paused: on PLAY the path restarts from this phase, bar 1 lands startDelay later
           const tau0 = this.ap.tau0, sp = this.ap.speed, d = E.startDelay;
           shipAt = (tOff) => this.pathAtTau(tau0 + sp * (tOff + d));
@@ -341,52 +495,83 @@
 
     // ------------------------------------------------------------ scheduling
     /** Called by the engine for every window [Ba, Bb) (after the fixed heads). */
+    segAt(m, B) {
+      let seg = m[0];
+      for (let i = m.length - 1; i >= 0; i--) if (m[i].b0 <= B) { seg = m[i]; break; }
+      return seg;
+    },
+    /** Crossings of plate p's chips past the ship over [sa, sb) under one motion segment. */
+    scanPlate(p, seg, sa, sb, posA, posB, R, hits) {
+      if (sb <= sa) return;
+      const X = MR.view.plateX(p);
+      const A = this.polar(posA, X), B = this.polar(posB, X);
+      const minDx = A.dx * B.dx <= 0 ? 0 : Math.min(Math.abs(A.dx), Math.abs(B.dx));
+      if (minDx > R) return;
+      const rLo = Math.max(0.05, p.rIn - R), rHi = p.rOut + R;
+      if (Math.max(A.r, B.r) < rLo || Math.min(A.r, B.r) > rHi) return;
+      if (Math.min(A.r, B.r) < 0.05) return; // angle is meaningless on the axis
+      const thB = A.th + wrapPi(B.th - A.th);
+      const psiA = seg.phi0 + seg.w * (sa - seg.b0) - A.th;
+      const psiB = seg.phi0 + seg.w * (sb - seg.b0) - thB;
+      if (psiA === psiB) return;
+      const lo = Math.min(psiA, psiB) - 1e-6, hi = Math.max(psiA, psiB) + 1e-6;
+      const rMid = (A.r + B.r) / 2, rSlack = R + Math.abs(A.r - B.r) / 2;
+      for (const c of p.chips) {
+        if (Math.abs(c.radius - rMid) > rSlack) continue;
+        const target = -c.angle;
+        let v = target + TAU * Math.ceil((lo - target) / TAU);
+        while (v < hi) {
+          const f = (v - psiA) / (psiB - psiA);
+          const Bh = Math.round((sa + f * (sb - sa)) * 1e9) / 1e9;
+          if (Bh >= sa && Bh < sb) {
+            const fs = (Bh - sa) / (sb - sa);
+            const P = this.polar(lerp3(posA, posB, fs), X);
+            const d = Math.hypot(P.dx, c.radius - P.r);
+            if (d < R && !MR.stack.restAt(p, Bh)) hits.push({ B: Bh, c, th: A.th + fs * (thB - A.th), d });
+          }
+          v += TAU;
+        }
+      }
+    },
+
     schedule(E, Ba, Bb, fc) {
       if (!fc || Bb <= Ba) return;
       const ta = E.timeAtBeat(Ba), tb = E.timeAtBeat(Bb);
-      // reuse the exact pose that ended the previous window so crossings at the
-      // shared edge land in exactly one window
-      const cur = E.sensorCursor;
-      const posA = cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : fc.shipAt(ta);
-      const posB = fc.shipAt(tb);
-      E.sensorCursor = { t: tb, pos: posB };
-      const R = fc.R;
+      // offline: keep consecutive windows' shared edge identical (live: prepareWindow did)
+      let posA, posB;
+      if (E.offline) {
+        const cur = E.sensorCursor;
+        posA = cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : fc.shipAt(ta);
+        posB = fc.shipAt(tb);
+        E.sensorCursor = { t: tb, pos: posB };
+      } else {
+        posA = fc.shipAt(ta); posB = fc.shipAt(tb);
+      }
+      // corners of the recorded path inside this window (export replays of hand flight)
+      const pathCuts = fc.knotsIn ? fc.knotsIn(ta, tb).map((t) => E.beatAt(t)) : [];
       const anySolo = MR.stack.anySolo();
       for (const p of MR.stack.plates) {
         if (E.onlyPlate ? p !== E.onlyPlate : !p.audible(anySolo)) continue;
-        const X = MR.view.plateX(p);
-        const A = this.polar(posA, X), B = this.polar(posB, X);
-        const minDx = A.dx * B.dx <= 0 ? 0 : Math.min(Math.abs(A.dx), Math.abs(B.dx));
-        if (minDx > R) continue;
-        const rLo = Math.max(0.05, p.rIn - R), rHi = p.rOut + R;
-        if (Math.max(A.r, B.r) < rLo || Math.min(A.r, B.r) > rHi) continue;
-        if (Math.min(A.r, B.r) < 0.05) continue; // angle is meaningless on the axis
-        const thB = A.th + wrapPi(B.th - A.th);
-        const psiA = p.angleAtBeat(Ba) - A.th;
-        const psiB = p.angleAtBeat(Bb) - thB;
-        if (psiA === psiB) continue;
-        const lo = Math.min(psiA, psiB) - 1e-6, hi = Math.max(psiA, psiB) + 1e-6;
-        const rMid = (A.r + B.r) / 2, rSlack = R + Math.abs(A.r - B.r) / 2;
+        // the motion being rendered (an export's own copy offline), split at segment
+        // starts so ψ is never interpolated across an angle jump
+        const m = E.motions ? E.motions.get(p) : p.motion;
+        const cuts = [Ba];
+        for (const s of m) if (s.b0 > Ba && s.b0 < Bb) cuts.push(s.b0);
+        for (const b of pathCuts) if (b > Ba && b < Bb) cuts.push(b);
+        cuts.sort((x, y) => x - y);
+        cuts.push(Bb);
         const hits = [];
-        for (const c of p.chips) {
-          if (Math.abs(c.radius - rMid) > rSlack) continue;
-          const target = -c.angle;
-          let v = target + TAU * Math.ceil((lo - target) / TAU);
-          while (v < hi) {
-            const f = (v - psiA) / (psiB - psiA);
-            const Bh = Math.round((Ba + f * (Bb - Ba)) * 1e9) / 1e9;
-            if (Bh >= Ba && Bh < Bb) {
-              const fs = (Bh - Ba) / (Bb - Ba);
-              const P = this.polar(lerp3(posA, posB, fs), X);
-              const d = Math.hypot(P.dx, c.radius - P.r);
-              if (d < R && !MR.stack.restAt(p, Bh)) hits.push({ B: Bh, c, th: A.th + fs * (thB - A.th), d });
-            }
-            v += TAU;
-          }
+        for (let i = 0; i + 1 < cuts.length; i++) {
+          const sa = cuts[i], sb = cuts[i + 1];
+          if (sb - sa < 1e-12) continue;
+          // ends of each piece: exact path where the context knows it, else window lerp
+          const pa = i === 0 ? posA : pathCuts.length ? fc.shipAt(E.timeAtBeat(sa)) : lerp3(posA, posB, (sa - Ba) / (Bb - Ba));
+          const pb = i + 2 === cuts.length ? posB : pathCuts.length ? fc.shipAt(E.timeAtBeat(sb)) : lerp3(posA, posB, (sb - Ba) / (Bb - Ba));
+          this.scanPlate(p, this.segAt(m, sa), sa, sb, pa, pb, fc.R, hits);
         }
         hits.sort((x, y) => x.B - y.B);
         for (const h of hits) {
-          const gain = fc.sensorGain * Math.pow(1 - h.d / R, 1.3);
+          const gain = fc.sensorGain * Math.pow(1 - h.d / fc.R, 1.3);
           E.fire(p, h.c, E.timeAtBeat(h.B), h.th, h.B, gain, { sensor: true, dist: h.d });
           if (!E.offline) this.stats.sensor++;
         }

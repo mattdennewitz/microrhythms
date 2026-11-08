@@ -115,15 +115,22 @@
       const startBeat = 0;
       const motions = playing ? new Map(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
       const flight = MR.flight.on ? MR.flight.exportCtx() : null;
+      // while playing, replay the tempo map since PLAY (offline time 0 = bar 1)
+      let clock = null;
+      if (playing) {
+        const t0 = E.timeAtBeat(0);
+        clock = E.clock.map((s) => ({ t0: s.t0 - t0, b0: s.b0, bps: s.bps }));
+        clock[0] = { t0: 0, b0: 0, bps: clock[0].bps };
+      }
       const listenerPose = flight ? null : E.listenerPose(MR.view);
-      return { startBeat, motions, flight, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
+      return { startBeat, motions, flight, clock, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
     },
 
-    async render(onlyPlate, plan) {
-      const L = this.seconds();
+    beats() { return this.phrases * MR.stack.phraseBars * 4; },
+    async render(onlyPlate, plan, onProgress) {
       const pl = plan || this.plan();
-      const buf = await MR.engine.renderOffline(Object.assign({ seconds: L, tail: 4, onlyPlate }, pl));
-      return this.mode === 'loop' ? foldLoop(buf, L) : buf;
+      const buf = await MR.engine.renderOffline(Object.assign({ beats: this.beats(), tail: 4, onlyPlate, onProgress }, pl));
+      return this.mode === 'loop' ? foldLoop(buf, buf.loopSeconds) : buf;
     },
 
     describe(plan) {
@@ -131,12 +138,12 @@
       return `from bar ${bar}${plan.flight ? ` · flight, ${plan.flight.where}` : ''}`;
     },
 
-    async exportWav({ save = true } = {}) {
+    async exportWav({ save = true, onProgress } = {}) {
       if (this.busy) return null;
       this.busy = true;
       try {
         const plan = this.plan();
-        const buf = await this.render(null, plan);
+        const buf = await this.render(null, plan, onProgress ? (f) => onProgress(0, 1, 'mix', f) : null);
         const wav = encodeWav(buf);
         const name = `${this.baseName(plan)}${this.mode === 'loop' ? '-loop' : ''}.wav`;
         this.last = { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf), from: this.describe(plan) };
@@ -154,8 +161,8 @@
         const files = [];
         const plan = this.plan(); // one plan for every stem, so they sum to the mix
         for (let i = 0; i < plates.length; i++) {
-          if (onProgress) onProgress(i, plates.length, plates[i].name);
-          const buf = await this.render(plates[i], plan);
+          if (onProgress) onProgress(i, plates.length, plates[i].name, 0);
+          const buf = await this.render(plates[i], plan, onProgress ? (f) => onProgress(i, plates.length, plates[i].name, f) : null);
           files.push({ name: `${plates[i].name}.wav`, data: encodeWav(buf) });
         }
         const blob = zip(files);

@@ -485,6 +485,23 @@
 
       if (MR.flight && MR.flight.on) this.drawSensorGate(g, p, X, tv, lw);
 
+      // keyboard cell cursor (canvas focused)
+      const cc = this.cursorCell;
+      if (cc && cc.plate === p && cc.track < p.tracks && cc.sector < p.steps) {
+        const a = (cc.sector * TAU) / p.steps + phi;
+        const r = p.rIn + (cc.track + 0.5) * p.trackW;
+        const hw = (TAU / p.steps) * 0.5, hr = p.trackW * 0.5;
+        const q0 = this.pp(X, r - hr, a - hw), q1 = this.pp(X, r + hr, a - hw), q2 = this.pp(X, r + hr, a + hw), q3 = this.pp(X, r - hr, a + hw);
+        if (q0 && q1 && q2 && q3) {
+          g.save();
+          g.globalCompositeOperation = 'source-over';
+          g.strokeStyle = 'rgba(255,255,255,0.95)';
+          g.lineWidth = 1.5 * dpr;
+          g.beginPath(); g.moveTo(q0[0], q0[1]); g.lineTo(q1[0], q1[1]); g.lineTo(q2[0], q2[1]); g.lineTo(q3[0], q3[1]); g.closePath(); g.stroke();
+          g.restore();
+        }
+      }
+
       // selection brackets
       if (sel) {
         const top = this.pp(X, p.rOut + 0.18, Math.PI / 2), bot = this.pp(X, p.rOut + 0.18, -Math.PI / 2);
@@ -556,7 +573,7 @@
       // minimap: side view, axis horizontal, radius vertical
       const S = MR.stack;
       const mw = Math.min(300 * dpr, (this.w - (MR.ui ? MR.ui.panelWidth() * dpr : 0)) * 0.36), mh = 96 * dpr;
-      const mx = (this.w - (MR.ui ? MR.ui.panelWidth() * dpr : 0)) - mw - 22 * dpr, my = this.h - mh - 46 * dpr;
+      const mx = (this.w - (MR.ui ? MR.ui.panelWidth() * dpr : 0)) - mw - 22 * dpr, my = this.h - mh - 92 * dpr; // clear of the fly dock
       const xs = S.plates.map((p) => this.plateX(p));
       const x0 = Math.min(...xs) - 1.2, x1 = Math.max(...xs) + 1, rMax = 2.1;
       const toX = (x) => mx + ((x - x0) / (x1 - x0)) * mw;
