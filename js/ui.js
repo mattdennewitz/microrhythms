@@ -477,8 +477,8 @@
       this.lenSeg = seg($('len-row'), [1, 2, 4].map((n) => ({ label: `${n} PHRASE${n > 1 ? 'S' : ''}`, value: n })),
         (v) => { X.phrases = v; this.lenSeg.set(v); this.syncExport(); });
       this.loopSeg = seg($('loop-row'), [
-        { label: 'LOOP', value: 'loop', title: 'exact length, tail folded back onto the start' },
-        { label: 'WITH TAIL', value: 'tail', title: 'exact length plus 4 s of reverb/delay tail' },
+        { label: 'AS PLAYED', value: 'tail', title: 'exactly what PLAY plays, plus 4 s of reverb/delay tail' },
+        { label: 'LOOP', value: 'loop', title: 'exact length with the tail folded onto the start (for looping; bar 1 then carries the tail)' },
       ], (v) => { X.mode = v; this.loopSeg.set(v); });
       this.lenSeg.set(X.phrases);
       this.loopSeg.set(X.mode);
@@ -500,7 +500,7 @@
     },
     syncExport() {
       const X = MR.exporter;
-      $('export-status').textContent = `${X.phrases * MR.stack.phraseBars} bars · ${X.seconds().toFixed(1)} s from the current phrase (bar 1 when stopped) · 24-bit 48 kHz`;
+      $('export-status').textContent = `${X.phrases * MR.stack.phraseBars} bars · ${X.seconds().toFixed(1)} s · what PLAY plays, from bar 1 · 24-bit 48 kHz`;
     },
 
     // ------------------------------------------------------------ meters

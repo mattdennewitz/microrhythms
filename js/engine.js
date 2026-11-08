@@ -31,6 +31,7 @@
     voices: 0,
     active: new Set(),
     lastScheduled: 0,
+    startDelay: 0.06,       // PLAY starts bar 1 this long after the press
     clock: [{ t0: 0, b0: 0, bps: 112 / 60 }],
     nextBarBeat: 4,
     pending: [],            // queued switches {beat, kind, apply, label}
@@ -185,7 +186,7 @@
       const ctx = this.ensureCtx();
       if (ctx.state !== 'running') { try { await ctx.resume(); } catch (e) { /* gesture needed */ } }
       if (this.playing) return;
-      const t = ctx.currentTime + 0.06;
+      const t = ctx.currentTime + this.startDelay;
       this.clock = [{ t0: t, b0: 0, bps: this.bpm / 60 }];
       MR.stack.plates.forEach((p) => p.startMotion());
       this.lastScheduled = t;

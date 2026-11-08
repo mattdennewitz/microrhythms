@@ -96,7 +96,7 @@
 
   const exporter = {
     phrases: 1,
-    mode: 'loop',      // 'loop' | 'tail'
+    mode: 'tail',      // 'tail' (as played) | 'loop' (tail folded onto the start)
     busy: false,
     last: null,        // last result, kept for tests
 
@@ -106,16 +106,15 @@
       return `orbital-${Math.round(MR.engine.bpm)}bpm-${this.phrases * MR.stack.phraseBars}bars-from${bar}${plan && plan.flight ? '-flight' : ''}`;
     },
 
-    /** What to render so the file is what you hear: while playing, from the start of
-     *  the current phrase with the plates exactly as they are moving (and the ship, in
-     *  flight); when stopped, from bar 1. */
+    /** Render what PLAY plays: the song from bar 1. Stopped, that's exactly what the
+     *  next PLAY will produce (plates from their start, the paused ship carrying on);
+     *  playing, it's this PLAY from bar 1, with the plates as they have moved. */
     plan() {
       const E = MR.engine, S = MR.stack;
-      const phraseBeats = 4 * S.phraseBars;
       const playing = E.playing && E.ctx;
-      const startBeat = playing ? Math.floor(E.songBeat(E.ctx.currentTime) / phraseBeats) * phraseBeats : 0;
+      const startBeat = 0;
       const motions = playing ? new Map(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
-      const flight = MR.flight.on ? MR.flight.exportCtx(startBeat) : null;
+      const flight = MR.flight.on ? MR.flight.exportCtx() : null;
       const listenerPose = flight ? null : E.listenerPose(MR.view);
       return { startBeat, motions, flight, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
     },

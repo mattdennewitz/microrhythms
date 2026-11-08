@@ -89,7 +89,7 @@ fields. The ship is a **moving read head**:
   CHANCE instead. A side-view minimap (axis × radius) shows the fields and your sensor.
 - The autopilot cruises only while the music plays: stop and the ship holds its
   place (❚❚), press play and it carries on from there.
-- Exports render what the ship hears (see Output).
+- Exports render what the ship hears from bar 1, exactly as PLAY plays it (see Output).
 
 ## Fragments
 
@@ -103,14 +103,16 @@ fields. The ship is a **moving read head**:
 
 ## Output
 
-**EXPORT WAV** renders **what you are hearing**: while playing, from the start of the
-current phrase (1, 2 or 4 phrases), with the plates exactly as they are moving; when
-stopped, from bar 1. Chance rolls are deterministic per beat, so the export contains the
-same hits you heard. In flight it renders the ship's sensor hits, the proximity mix and
-the listener at the ship: parked or flying by hand, from where you are; on autopilot,
-along the path in sync with the song. Export as an exact **LOOP** (the tail is folded
-onto the start) or **WITH TAIL**. **STEMS .ZIP** renders one WAV per audible plate from
-the same plan, so the stems sum to the mix. The files are 24-bit / 48 kHz.
+**EXPORT WAV** renders **what PLAY plays**: the song from bar 1 (1, 2 or 4 phrases).
+Every PLAY starts the song at bar 1, so when stopped the export is exactly what your
+next PLAY will produce; while playing it's this PLAY from bar 1. Chance rolls are
+deterministic per beat, so the export has the same hits you hear. In flight it renders
+the ship's sensor hits, the proximity mix and the listener at the ship: parked or flying
+by hand, from where you are; on autopilot, with the paused path carrying on exactly as
+it does after PLAY. **AS PLAYED** (default) keeps the reverb/delay tail at the end;
+**LOOP** folds it onto the start for seamless looping (so bar 1 then carries the tail).
+**STEMS .ZIP** renders one WAV per audible plate from the same plan. The files are
+24-bit / 48 kHz.
 
 ## Your own sounds
 

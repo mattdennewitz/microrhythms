@@ -86,8 +86,8 @@
       const s = f * f * (3 - 2 * f);
       return lerp3(b.from, raw, s);
     },
-    pathPos(t) {
-      const tau = this.tau(t);
+    pathPos(t) { return this.pathAtTau(this.tau(t)); },
+    pathAtTau(tau) {
       const [x0, x1] = this.span();
       const u = 0.5 - 0.5 * Math.cos((TAU * tau) / this.PERIOD);
       const x = lerp(x0, x1, u);
@@ -261,29 +261,50 @@
         sensorGain: this.sensorGain, useChance: this.useChance };
     },
 
-    /** A frozen copy of the flight for an export starting at song beat `startBeat`.
-     *  Autopilot (while playing): the ship follows the same path in sync with the song,
-     *  so the render matches what you heard and will hear. Otherwise the ship stays
-     *  where it is now, facing where it faces now. */
-    exportCtx(startBeat) {
+    /** A frozen copy of the flight for an export of what PLAY plays (song from bar 1;
+     *  export time tOff = 0 is the downbeat of bar 1).
+     *  - Autopilot, stopped: the paused path resumes when PLAY starts the song, so the
+     *    ship moves exactly as it will after you press play.
+     *  - Autopilot, playing: the path as it has run since this PLAY.
+     *  - By hand: the ship where it is (coasting to a stop if it's still drifting). */
+    exportCtx() {
       const E = MR.engine;
       const bps = E.bpm / 60;
       const base = { headMix: this.headMix, falloff: this.falloff, R: this.R, sensorGain: this.sensorGain, useChance: this.useChance };
-      if (this.autopilot && E.playing) {
-        const liveT = (tOff) => E.timeAtBeat(startBeat + tOff * bps);
-        const shipAt = (tOff) => this.apPos(liveT(tOff));
-        const poseAt = (tOff) => {
-          const t = liveT(tOff), a = this.apPos(t), b = this.apPos(t + 0.6);
-          let f = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
-          f = Math.hypot(f[0], f[1], f[2]) > 1e-5 ? norm(f) : this.fwdSmooth;
-          const right = norm(cross(f, [0, 1, 0]));
-          return { pos: a, fwd: f, up: cross(right, f) };
-        };
+      const lookYaw = this.autopilot ? this.lookYaw : 0, lookPitch = this.autopilot ? this.lookPitch : 0;
+      const frameAt = (a, b) => {
+        let f = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
+        f = Math.hypot(f[0], f[1], f[2]) > 1e-5 ? norm(f) : this.fwdSmooth;
+        if (lookYaw || lookPitch) {
+          const yaw = Math.atan2(f[2], f[0]) + lookYaw;
+          const pitch = clamp(Math.asin(clamp(f[1], -1, 1)) + lookPitch, -1.45, 1.45);
+          const cp = Math.cos(pitch);
+          f = [cp * Math.cos(yaw), Math.sin(pitch), cp * Math.sin(yaw)];
+        }
+        const right = norm(cross(f, [0, 1, 0]));
+        return { pos: a, fwd: f, up: cross(right, f) };
+      };
+      if (this.autopilot) {
+        let shipAt;
+        if (E.playing) {
+          shipAt = (tOff) => this.apPos(E.timeAtBeat(tOff * bps));
+        } else {
+          // paused: on PLAY the path restarts from this phase, bar 1 lands startDelay later
+          const tau0 = this.ap.tau0, sp = this.ap.speed, d = E.startDelay;
+          shipAt = (tOff) => this.pathAtTau(tau0 + sp * (tOff + d));
+        }
+        const poseAt = (tOff) => frameAt(shipAt(tOff), shipAt(tOff + 0.6));
         return Object.assign(base, { moving: true, shipAt, poseAt, where: 'along the autopilot path' });
       }
       const pose = this.pose();
       const pos = pose.pos.slice();
-      return Object.assign(base, { moving: false, shipAt: () => pos, poseAt: () => ({ pos, fwd: pose.fwd, up: pose.up }), where: 'at the ship\'s position' });
+      const vel = E.playing ? [0, 0, 0] : this.vel.slice();
+      const k = 1.4, d = E.playing ? 0 : E.startDelay;
+      const drifting = Math.hypot(vel[0], vel[1], vel[2]) > 1e-3;
+      const shipAt = drifting
+        ? (tOff) => { const g = (1 - Math.exp(-k * (tOff + d))) / k; return [pos[0] + vel[0] * g, pos[1] + vel[1] * g, pos[2] + vel[2] * g]; }
+        : () => pos;
+      return Object.assign(base, { moving: drifting, shipAt, poseAt: (tOff) => ({ pos: shipAt(tOff), fwd: pose.fwd, up: pose.up }), where: 'at the ship\'s position' });
     },
 
     /** Ship position expressed in a plate's plane. */
