@@ -109,6 +109,7 @@ export function Toggle({ on, className, children, ...rest }: { on: boolean; chil
 export function usePressable(onTap: (e: MouseEvent<HTMLButtonElement>) => void, onLong: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const longFired = useRef(false);
+  useEffect(() => () => clearTimeout(timer.current), []);
   const clear = () => clearTimeout(timer.current);
   return {
     onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {

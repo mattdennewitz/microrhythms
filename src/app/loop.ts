@@ -4,14 +4,10 @@ import { flight } from '../core/flight';
 import { view } from '../core/view';
 import { runFrameFns } from './store';
 
-let started = false;
-
-/** Attach the renderer to the stage canvas and start drawing. Idempotent
- *  (StrictMode runs effects twice; there must only ever be one loop). */
+/** Attach the renderer and run one loop for the lifetime of the stage effect.
+ * Cleanup lets StrictMode replay the effect, or a new stage mount, start fresh. */
 export function startLoop(canvas: HTMLCanvasElement) {
-  if (started) return;
-  started = true;
-  view.init(canvas);
+  const disposeView = view.init(canvas);
   let last = performance.now(), frames = 0, acc = 0;
   function frame(now: number) {
     const E = engine, V = view;
@@ -43,7 +39,11 @@ export function startLoop(canvas: HTMLCanvasElement) {
 
     frames++; acc += now - last; last = now;
     if (acc > 1000) { window.MR_DEBUG.fps = Math.round(frames * 1000 / acc); frames = 0; acc = 0; }
-    requestAnimationFrame(frame);
+    raf = requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
+  let raf = requestAnimationFrame(frame);
+  return () => {
+    cancelAnimationFrame(raf);
+    disposeView();
+  };
 }

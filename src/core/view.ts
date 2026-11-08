@@ -67,14 +67,16 @@ export const view = {
   cursorCell: undefined as CursorCell | null | undefined,
   hoverHit: undefined as PickHit | null | undefined,
 
-  init(canvas: HTMLCanvasElement): void {
+  init(canvas: HTMLCanvasElement): () => void {
     this.canvas = canvas;
     this.g = canvas.getContext('2d');
     this.small = document.createElement('canvas');
     this.sg = this.small.getContext('2d');
     this.canBlur = 'filter' in this.sg!;
     this.resize();
-    window.addEventListener('resize', () => this.resize());
+    const resize = () => this.resize();
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
   },
 
   resize(): void {

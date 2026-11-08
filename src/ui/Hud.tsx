@@ -80,7 +80,11 @@ function hudFrame(tv: number) {
 
 export function Hud() {
   useRevision();
-  useEffect(() => onFrame(hudFrame), []);
+  useEffect(() => {
+    // Cached strings belong to the current DOM, not a previous HUD mount.
+    htmlCache.clear();
+    return onFrame(hudFrame);
+  }, []);
   return (
     <div id="hud">
       <div className="hud-tl">

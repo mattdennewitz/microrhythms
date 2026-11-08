@@ -2,10 +2,14 @@
   "name": "microrhythms",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "cf dev",
     "build": "tsc --noEmit && cf build",
     "typecheck": "tsc --noEmit",
+    "test": "node --import ./tests/register.mjs --test tests/*.test.mjs",
     "preview": "vite preview",
     "deploy": "tsc --noEmit && cf deploy"
   },

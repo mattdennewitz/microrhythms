@@ -18,7 +18,7 @@ export function Stage() {
 
   useEffect(() => {
     const cv = ref.current!;
-    startLoop(cv);
+    const stopLoop = startLoop(cv);
     const V = view;
     const ac = new AbortController();
     const on = <K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void, opts?: AddEventListenerOptions) =>
@@ -126,7 +126,12 @@ export function Stage() {
       // the window-level shortcut handler must not see keys the stack used
       if (handled) { e.preventDefault(); e.stopPropagation(); }
     });
-    return () => ac.abort();
+    return () => {
+      ac.abort();
+      stopLoop();
+      app.clearCell();
+      V.hoverHit = null;
+    };
   }, []);
 
   return (

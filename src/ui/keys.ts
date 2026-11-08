@@ -80,6 +80,9 @@ export function useGlobalKeys() {
     window.addEventListener('keydown', onKeyDown, { signal: ac.signal });
     window.addEventListener('keyup', onKeyUp, { signal: ac.signal });
     window.addEventListener('blur', () => flight.keys.clear(), { signal: ac.signal }); // no stuck thrust
-    return () => ac.abort();
+    return () => {
+      ac.abort();
+      flight.keys.clear();
+    };
   }, []);
 }

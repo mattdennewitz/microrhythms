@@ -208,15 +208,38 @@ The core keeps its state in mutable singletons. UI actions change that state and
 React never re-renders at 60 fps. In development builds every core module is also on
 `window.MR` for poking at from the console.
 
+React effects own their canvas animation loop, resize/input listeners and frame
+subscriptions, and release them on unmount. Pending long-press timers, held flight
+keys and panel references are cleared too. Remounting (including StrictMode effect
+replay) rebinds the current canvas and refreshes HUD text; core singleton state
+persists across UI remounts.
+
 ## Developing
 
+Use **Node.js 22.18 or later** and npm; **Node.js 24 LTS** is recommended.
+Cloudflare loads `cloudflare.config.ts` using Node's TypeScript support; Bun is
+not a supported runtime for the `cf` CLI.
+The committed lockfile pins the CLI, Vite and the Cloudflare plugin v2 beta.
+
 ```
-npm install
+npm ci
 npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
-npm run typecheck  # tsc
-npm run build      # typecheck + production build into .cloudflare/output
-npm run preview    # serve the production build locally
+npm run typecheck  # tsc, including Vite and Cloudflare configuration
+npm test           # dependency-free core regression tests using Node's TS support
+npm run build      # typecheck + production build into .cloudflare/output/v0
+npm run preview    # serve the last production build locally (build first)
 ```
+
+The core tests cover deterministic helpers and plates, JSON snapshots,
+stopped-engine undo/redo, and WAV/ZIP encoding. They do not exercise React DOM,
+browser audio playback or offline audio rendering; check those in a browser.
+
+The production HTML and hashed JS/CSS live in
+`.cloudflare/output/v0/workers/default/assets/`, alongside Cloudflare deployment
+metadata. `preview` uses this Build Output in the local Workers runtime; it does
+not rebuild or publish a remote preview. Rebuild after changing source files.
+For Vite server flags, invoke Vite directly, for example
+`npx --no-install vite --host 127.0.0.1 --port 5173`; `cf dev` only forwards `--mode`.
 
 Because the code is ES modules, the page has to be served — opening `index.html`
 from disk (`file://`) no longer works.
@@ -229,8 +252,22 @@ only, no Worker script) on the custom domain `microrhythms.dennewitz.computer`.
 Vite plugin (v2) reads it, and Cloudflare's `cf` CLI builds and deploys:
 
 ```
-npm run deploy     # typecheck, then cf deploy → production
+npm run deploy -- --dry-run  # typecheck, build and validate; no upload or credentials
+npm run deploy              # typecheck, build and deploy to production
 ```
 
-`cf` must be signed in to the account that owns the `dennewitz.computer` zone
-(`cf auth whoami`).
+`cf deploy` builds through Vite rather than invoking the npm `build` script, so
+both `build` and `deploy` explicitly run the TypeScript check first. A dry run
+does not verify account permissions, domain ownership or remote availability.
+To validate an existing production build without rebuilding, use
+`npx --no-install cf deploy --prebuilt --mode production --dry-run`.
+
+For an actual deployment, sign in with `npx --no-install cf auth login`, then
+inspect `npx --no-install cf auth whoami`, or supply `CLOUDFLARE_API_TOKEN` in CI
+with access to the configured account and zone. `cf` has its own credentials and
+does not reuse a Wrangler login. Keep credentials out of source control; an
+environment `CLOUDFLARE_ACCOUNT_ID` overrides the account in configuration.
+
+See Cloudflare's [CLI requirements and authentication](https://developers.cloudflare.com/cf/get-started/),
+[build and deployment commands](https://developers.cloudflare.com/cf/projects/),
+and [Vite plugin v2 beta behavior](https://developers.cloudflare.com/workers/vite-plugin/v2-beta/).

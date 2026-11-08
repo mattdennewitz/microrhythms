@@ -30,7 +30,10 @@ const PHRASES = [4, 8, 16, 32];
 export function Panel() {
   useRevision();
   const ref = useRef<HTMLElement>(null);
-  useEffect(() => { app.panelEl = ref.current; }, []);
+  useEffect(() => {
+    app.panelEl = ref.current;
+    return () => { app.panelEl = null; };
+  }, []);
   return (
     // a hidden panel leaves the tab order
     <aside id="panel" aria-label="Controls" ref={ref} inert={app.panelHidden}>
