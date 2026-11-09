@@ -59,11 +59,40 @@ function FlyDock() {
 
 function HoldButton({ id, k, title, children }: { id: string; k: string; title: string; children: string }) {
   const [held, setHeld] = useState(false);
-  const off = () => { app.holdKey(k, false); setHeld(false); };
+  const pointer = useRef<number | null>(null);
+  const off = () => {
+    if (pointer.current === null) return;
+    pointer.current = null;
+    app.holdKey(k, false);
+    setHeld(false);
+  };
+  const release = (e: { pointerId: number }) => { if (e.pointerId === pointer.current) off(); };
+  useEffect(() => {
+    const hidden = () => { if (document.hidden) off(); };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    window.addEventListener('blur', off);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      window.removeEventListener('blur', off);
+      document.removeEventListener('visibilitychange', hidden);
+      off();
+    };
+  }, [k, flight.on]);
   return (
     <button id={id} className={'ghost' + (held ? ' on' : '')} title={title}
-      onPointerDown={(e) => { e.preventDefault(); if (app.holdKey(k, true)) setHeld(true); }}
-      onPointerUp={off} onPointerLeave={off} onPointerCancel={off}>{children}</button>
+      onPointerDown={(e) => {
+        if (e.button !== 0 || pointer.current !== null) return;
+        e.preventDefault();
+        if (app.holdKey(k, true)) {
+          pointer.current = e.pointerId;
+          setHeld(true);
+        }
+      }}
+      onPointerUp={release} onPointerLeave={release} onPointerCancel={release}
+      onLostPointerCapture={release}>{children}</button>
   );
 }
 

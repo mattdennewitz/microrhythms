@@ -25,15 +25,26 @@ export function Stage() {
       cv.addEventListener(type, fn, { signal: ac.signal, ...opts });
 
     // ---- pointer: drag to orbit (look, in flight), click to select / edit
-    let down: { x: number; y: number; lx: number; ly: number; yaw: number; pitch: number; moved: boolean } | null = null;
+    let down: { id: number; x: number; y: number; lx: number; ly: number; yaw: number; pitch: number; moved: boolean } | null = null;
+    const cancelDrag = () => {
+      if (!down) return;
+      const id = down.id;
+      down = null;
+      cv.classList.remove('dragging');
+      if (cv.hasPointerCapture(id)) cv.releasePointerCapture(id);
+    };
     on('pointerdown', (e) => {
-      down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: V.dragYaw, pitch: V.dragPitch, moved: false };
+      if (e.pointerType === 'touch' && !e.isPrimary) { cancelDrag(); return; }
+      if (!e.isPrimary || e.button !== 0 || down) return;
+      down = { id: e.pointerId, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: V.dragYaw, pitch: V.dragPitch, moved: false };
+      cv.focus({ preventScroll: true });
       cv.setPointerCapture(e.pointerId);
     });
     on('pointermove', (e) => {
-      if (down) {
+      if (down && e.pointerId === down.id) {
         const dx = e.clientX - down.x, dy = e.clientY - down.y;
         if (Math.abs(dx) + Math.abs(dy) > 4) { down.moved = true; cv.classList.add('dragging'); }
+        if (!down.moved) return;
         if (flight.on) {
           flight.look((e.clientX - down.lx) * 0.004, -(e.clientY - down.ly) * 0.004);
           notify();
@@ -45,13 +56,14 @@ export function Stage() {
         notify();
         return;
       }
+      if (e.pointerType === 'touch') return;
       const hit = V.pick(e.clientX, e.clientY, engine.visualTime(), engine.playing);
       V.hover = hit && hit.chip ? { plate: hit.plate, chip: hit.chip } : null;
       V.hoverHit = hit;
       cv.classList.toggle('pointing', !!hit);
     });
     on('pointerup', (e) => {
-      if (!down) return;
+      if (!down || e.pointerId !== down.id) return;
       cv.classList.remove('dragging');
       if (!down.moved) {
         const hit = V.pick(e.clientX, e.clientY, engine.visualTime(), engine.playing);
@@ -70,9 +82,18 @@ export function Stage() {
       }
       down = null;
     });
-    on('pointercancel', () => { down = null; cv.classList.remove('dragging'); });
-    on('pointerleave', () => { if (!down) V.hover = null; });
+    on('pointercancel', (e) => { if (down?.id === e.pointerId) cancelDrag(); });
+    on('lostpointercapture', (e) => { if (down?.id === e.pointerId) cancelDrag(); });
+    on('pointerleave', () => {
+      if (!down) { V.hover = null; V.hoverHit = null; cv.classList.remove('pointing'); }
+    });
+    window.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch' && down && e.pointerId !== down.id) cancelDrag();
+    }, { signal: ac.signal });
+    window.addEventListener('blur', cancelDrag, { signal: ac.signal });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) cancelDrag(); }, { signal: ac.signal });
     on('wheel', (e) => {
+      if (e.ctrlKey || e.metaKey) return; // browser/trackpad zoom is not camera zoom
       e.preventDefault();
       if (flight.on) {
         flight.R = clamp(flight.R * Math.exp(-e.deltaY * 0.001), 0.06, 0.8);
@@ -131,6 +152,7 @@ export function Stage() {
       if (handled) { notify(); e.preventDefault(); e.stopPropagation(); }
     });
     return () => {
+      cancelDrag();
       ac.abort();
       stopLoop();
       app.clearCell();
