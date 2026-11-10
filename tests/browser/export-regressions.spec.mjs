@@ -97,7 +97,6 @@ for (const kind of ['mix', 'stems']) {
       const measured = type === 'mix'
         ? { name: exported.name, measurement: window.audioFixture.measureWav(exported.wav) }
         : { name: exported.name, members: await window.audioFixture.measureZip(exported.blob) };
-      exporter.last = null;
       return { ...measured, changed, names, busy: exporter.busy,
         current: { bpm: engine.bpm, phraseBars: stack.phraseBars, phrases: exporter.phrases, mode: exporter.mode } };
     }, kind);
@@ -142,7 +141,6 @@ test('export snapshot: later stem throw delay keeps the captured BPM in actual P
     } });
     if (!result) throw new Error('throw snapshot export unexpectedly refused');
     const members = await window.audioFixture.measureZip(result.blob);
-    exporter.last = null;
     return { name: result.name, members, changed, busy: exporter.busy };
   });
   await page.evaluate(() => {
@@ -206,6 +204,7 @@ test('fractional BPM: plate cycle doubles grain spacing without changing export 
     const plate = window.MR.stack.plates[0];
     plate.cycle = 8;
     plate.generate();
+    plate.phiFrozen = plate.phase0;
     plate.startMotion();
   });
   const doubled = await exportAudio(page, 'mix');
@@ -228,7 +227,6 @@ async function measureDownload(page, download, testInfo, kind, artifactName) {
     return type === 'mix' ? { measurement: window.audioFixture.measureWav(bytes) }
       : { members: await window.audioFixture.measureZip(new Blob([bytes])) };
   }, { base64: encoded, type: kind });
-  await page.evaluate(() => { window.MR.exporter.last = null; });
   return { name: download.suggestedFilename(), ...result };
 }
 
@@ -253,8 +251,6 @@ test('tempo history: actual UI WAV/ZIP downloads and PLAY tempo change honor LOO
     await expect(loop).toHaveAttribute('aria-pressed', 'true');
     await expect(page.locator('#sl-phrase')).toHaveAttribute('aria-valuetext', '4 BARS');
     await expect(page.locator('#sl-bpm')).toHaveAttribute('aria-valuetext', '120 BPM');
-    await expect.soft(loop).toHaveAttribute('title', 'exact length at the current project BPM, with the tail folded onto the start');
-    await expect.soft(page.locator('#export-status')).toContainText('current project BPM, from bar 1');
 
     const mix = await measureDownload(page, await clickDownload(page, '#btn-export-wav'), testInfo, 'mix', 'ui-120bpm-loop.wav');
     const stems = await measureDownload(page, await clickDownload(page, '#btn-export-stems'), testInfo, 'stems', 'ui-120bpm-stems.zip');
@@ -292,3 +288,37 @@ test('tempo history: actual UI WAV/ZIP downloads and PLAY tempo change honor LOO
     await page.close();
   }
 });
+
+for (const playing of [false, true]) {
+  test(`current plate phase: ${playing ? 'playing active speed ignores historical and future segments' : 'stopped displayed phase'} has independent PCM onset timing`, async ({ page }, testInfo) => {
+    await setup(page, { bpm: 120 });
+    const result = await page.evaluate(async (playing) => {
+      const { engine, stack } = window.MR;
+      const control = await window.audioFixture.wav();
+      const p = stack.plates[0], w = p.omega();
+      if (playing) {
+        const ctx = engine.ensureCtx();
+        if (ctx.state !== 'suspended') await ctx.suspend();
+        engine.playing = true;
+        // The real display clock now reads precisely beat 2.25. No timer or audio stub.
+        engine.clock = [{ t0: engine.visualTime() - 2.25 * 0.5, b0: 0, bps: 2 }];
+        p.motion = [
+          { b0: 0, phi0: p.phase0, w },
+          { b0: 2, phi0: p.phase0 + w * 2, w: 2 * w },
+          { b0: 4, phi0: p.phase0 + w * 6, w: w / 2 },
+        ];
+      } else p.phiFrozen = p.phase0 + w * 0.25;
+      const shifted = await window.audioFixture.wav();
+      return { control, shifted };
+    }, playing);
+    const step = playing ? 0.5 : 1, onsetShift = playing ? 0.125 : 0.375;
+    await evidence(testInfo, 'current-phase-onset-pcm', result, {
+      frames: 384000, firstOnsetShiftSeconds: onsetShift,
+      beatSpacingSeconds: step * 0.5, bursts: playing ? 32 : 16,
+    });
+    assertTiming(result.control.measurement, { bpm: 120, bars: 4 });
+    assertTiming(result.shifted.measurement, { bpm: 120, bars: 4, step });
+    const actual = result.shifted.measurement.onsets[0] - result.control.measurement.onsets[0];
+    expect(Math.abs(actual - onsetShift), 'first PCM onset follows the current displayed phase').toBeLessThanOrEqual(QUANTUM);
+  });
+}

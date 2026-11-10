@@ -1,6 +1,6 @@
 /* Export: offline-rendered WAV of the mix, or a ZIP of per-plate stems. */
 import { stack, type Plate } from './stack';
-import { engine, type ClockSeg } from './engine';
+import { engine, type ClockSeg, type LoopPlan, type MixSnapshot } from './engine';
 import { flight, type ExportFlightCtx } from './flight';
 import { view } from './view';
 import type { MotionSeg, Pose } from './types';
@@ -9,7 +9,7 @@ export type ExportMode = 'tail' | 'loop';
 /** (stem index, stem count, stem name, fraction of this stem rendered) */
 export type ExportProgress = (index: number, count: number, name: string, fraction: number) => void;
 /** A file inside the stems ZIP. */
-export interface ZipEntry { name: string; data: Uint8Array<ArrayBuffer> }
+export interface ZipEntry { name: string; data: Uint8Array<ArrayBuffer> | Blob; crc?: number }
 /** Everything an export renders from; one plan serves every stem. */
 export interface ExportPlan {
   bpm: number;
@@ -21,6 +21,8 @@ export interface ExportPlan {
   flight: ExportFlightCtx | null;
   clock: ClockSeg[];
   listenerPose: Pose | null;
+  loopPlan: LoopPlan | null;
+  mix: MixSnapshot;
 }
 export interface WavExport { name: string; wav: Uint8Array<ArrayBuffer>; length: number; sampleRate: number; peak: number; from: string }
 export interface StemsExport { name: string; blob: Blob; files: string[]; from: string }
@@ -33,6 +35,7 @@ function encodeWav(buffer: AudioBuffer): Uint8Array<ArrayBuffer> {
   const dataLen = n * ch * bytes;
   const ab = new ArrayBuffer(44 + dataLen);
   const v = new DataView(ab);
+  const out = new Uint8Array(ab);
   const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
   str(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true); str(8, 'WAVE');
   str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, ch, true);
@@ -46,11 +49,11 @@ function encodeWav(buffer: AudioBuffer): Uint8Array<ArrayBuffer> {
       let s = Math.max(-1, Math.min(1, chans[c][i]));
       let x = Math.round(s * 8388607);
       if (x < 0) x += 16777216;
-      v.setUint8(o, x & 255); v.setUint8(o + 1, (x >> 8) & 255); v.setUint8(o + 2, (x >> 16) & 255);
+      out[o] = x & 255; out[o + 1] = (x >> 8) & 255; out[o + 2] = (x >> 16) & 255;
       o += 3;
     }
   }
-  return new Uint8Array(ab);
+  return out;
 }
 
 // ---- minimal store-only ZIP writer
@@ -70,25 +73,27 @@ function crc32(data: Uint8Array): number {
 }
 function zip(files: ZipEntry[]): Blob {
   const enc = new TextEncoder();
-  const parts: Uint8Array<ArrayBuffer>[] = [], central: Uint8Array<ArrayBuffer>[] = [];
+  const parts: BlobPart[] = [], central: Uint8Array<ArrayBuffer>[] = [];
   let offset = 0;
   for (const f of files) {
     const name = enc.encode(f.name);
-    const crc = crc32(f.data);
+    const size = f.data instanceof Blob ? f.data.size : f.data.length;
+    if (f.data instanceof Blob && f.crc === undefined) throw new Error('zip: Blob entry needs a crc');
+    const crc = f.crc ?? crc32(f.data as Uint8Array);
     const lh = new DataView(new ArrayBuffer(30));
-    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0, true); lh.setUint16(8, 0, true);
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
     lh.setUint16(10, 0, true); lh.setUint16(12, 0x21, true); lh.setUint32(14, crc, true);
-    lh.setUint32(18, f.data.length, true); lh.setUint32(22, f.data.length, true);
+    lh.setUint32(18, size, true); lh.setUint32(22, size, true);
     lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
     parts.push(new Uint8Array(lh.buffer), name, f.data);
     const cd = new DataView(new ArrayBuffer(46));
-    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0, true);
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true);
     cd.setUint16(10, 0, true); cd.setUint16(12, 0, true); cd.setUint16(14, 0x21, true); cd.setUint32(16, crc, true);
-    cd.setUint32(20, f.data.length, true); cd.setUint32(24, f.data.length, true); cd.setUint16(28, name.length, true);
+    cd.setUint32(20, size, true); cd.setUint32(24, size, true); cd.setUint16(28, name.length, true);
     cd.setUint16(30, 0, true); cd.setUint16(32, 0, true); cd.setUint16(34, 0, true); cd.setUint16(36, 0, true);
     cd.setUint32(38, 0, true); cd.setUint32(42, offset, true);
     central.push(new Uint8Array(cd.buffer), name);
-    offset += 30 + name.length + f.data.length;
+    offset += 30 + name.length + size;
   }
   const cdSize = central.reduce((s, a) => s + a.length, 0);
   const end = new DataView(new ArrayBuffer(22));
@@ -97,32 +102,18 @@ function zip(files: ZipEntry[]): Blob {
   return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
 }
 
-/** Fold everything past the loop point back onto the start: a seamless loop
- *  whose first bar already carries the previous pass's reverb/delay tail. */
-function foldLoop(buf: AudioBuffer, seconds: number): AudioBuffer {
-  const n = Math.round(seconds * buf.sampleRate);
-  const out = new AudioBuffer({ length: n, numberOfChannels: buf.numberOfChannels, sampleRate: buf.sampleRate });
-  for (let c = 0; c < buf.numberOfChannels; c++) {
-    const src = buf.getChannelData(c), dst = out.getChannelData(c);
-    for (let i = 0; i < src.length; i++) dst[i % n] += src[i];
-    for (let i = 0; i < n; i++) dst[i] = Math.max(-1, Math.min(1, dst[i]));
-  }
-  return out;
-}
-
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 export const exporter = {
   phrases: 1,
-  mode: 'tail' as ExportMode,      // 'tail' (as played) | 'loop' (tail folded onto the start)
+  mode: 'tail' as ExportMode,      // AS PLAYED | cyclic, warmed LOOP
   busy: false,
-  last: null as WavExport | StemsExport | null,        // last result, kept for tests
 
   seconds(): number { return this.phrases * stack.phraseBars * 4 * 60 / engine.bpm; },
   baseName(plan?: ExportPlan | null): string {
@@ -132,15 +123,27 @@ export const exporter = {
     return `orbital-${bpm}bpm-${pl.bars}bars-from${bar}${pl.flight ? '-flight' : ''}`;
   },
 
-  /** Capture timing once: LOOP uses project BPM; AS PLAYED replays this PLAY's
-   *  tempo history. Both retain beat-based plate motion and the listener/ship. */
+  /** Capture once: LOOP starts at the audible/displayed plate phase and current
+   *  listener/ship; AS PLAYED retains motion, tempo and flight history from PLAY. */
   plan(): ExportPlan {
     const E = engine, S = stack;
     const bpm = E.bpm, bars = this.phrases * S.phraseBars, beats = bars * 4, mode = this.mode;
     const playing = E.playing && E.ctx;
     const startBeat = 0;
-    const motions = playing ? new Map<Plate, MotionSeg[]>(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
-    const fl = flight.on ? flight.exportCtx() : null;
+    const currentBeat = mode === 'loop' && playing ? E.songBeat(E.visualTime()) : 0;
+    const motions = mode === 'loop'
+      ? new Map<Plate, MotionSeg[]>(S.plates.map((p): [Plate, MotionSeg[]] => {
+        if (!playing) return [p, [{ b0: 0, phi0: p.phiFrozen, w: p.omega() }]];
+        // A queued speed change may already be in motion: use the segment that
+        // is audible now, not the scheduling horizon or the next segment.
+        let seg = p.motion[0];
+        for (let i = p.motion.length - 1; i >= 0; i--) {
+          if (p.motion[i].b0 <= currentBeat) { seg = p.motion[i]; break; }
+        }
+        return [p, [{ b0: 0, phi0: seg.phi0 + seg.w * (currentBeat - seg.b0), w: seg.w }]];
+      }))
+      : playing ? new Map<Plate, MotionSeg[]>(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
+    const fl = flight.on ? flight.exportCtx(mode) : null;
     // Only AS PLAYED replays the tempo map since PLAY (offline time 0 = bar 1).
     let clock: ClockSeg[] = [{ t0: 0, b0: 0, bps: bpm / 60 }];
     if (mode === 'tail' && playing) {
@@ -149,17 +152,21 @@ export const exporter = {
       clock[0] = { t0: 0, b0: 0, bps: clock[0].bps };
     }
     const listenerPose = fl ? null : E.listenerPose(view);
-    return { bpm, bars, beats, mode, startBeat, motions, flight: fl, clock, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
+    const plan: ExportPlan = { bpm, bars, beats, mode, startBeat, motions, flight: fl, clock,
+      listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() },
+      loopPlan: null, mix: { master: E.masterLevel, space: E.spaceLevel, fxWet: E.fxWet, levels: S.plates.map((p) => p.level) } };
+    if (mode === 'loop') plan.loopPlan = E.captureLoop(plan);
+    return plan;
   },
 
   beats(): number { return this.phrases * stack.phraseBars * 4; },
   async render(onlyPlate: Plate | null, plan?: ExportPlan | null, onProgress?: ((f: number) => void) | null): Promise<AudioBuffer> {
     const pl = plan || this.plan();
-    const buf = await engine.renderOffline({ ...pl, tail: 4, onlyPlate, onProgress });
-    return pl.mode === 'loop' ? foldLoop(buf, buf.loopSeconds!) : buf;
+    return engine.renderOffline({ ...pl, loop: pl.mode === 'loop', tail: 4, onlyPlate, onProgress });
   },
 
   describe(plan: ExportPlan): string {
+    if (plan.mode === 'loop') return `current position · current pattern · local bar 1${plan.flight ? ` · flight, ${plan.flight.where}` : ''}`;
     const bar = Math.floor(plan.startBeat / 4) + 1;
     return `from bar ${bar}${plan.flight ? ` · flight, ${plan.flight.where}` : ''}`;
   },
@@ -170,11 +177,11 @@ export const exporter = {
     try {
       const plan = this.plan();
       const buf = await this.render(null, plan, onProgress ? (f: number) => onProgress(0, 1, 'mix', f) : null);
+      await new Promise<void>((r) => setTimeout(r, 0));
       const wav = encodeWav(buf);
       const name = `${this.baseName(plan)}${plan.mode === 'loop' ? '-loop' : ''}.wav`;
-      this.last = { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf), from: this.describe(plan) };
       if (save) download(new Blob([wav], { type: 'audio/wav' }), name);
-      return this.last;
+      return { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf), from: this.describe(plan) };
     } finally { this.busy = false; }
   },
 
@@ -185,21 +192,22 @@ export const exporter = {
       const anySolo = stack.anySolo();
       const plates = stack.plates.filter((p) => p.audible(anySolo));
       const files: ZipEntry[] = [];
-      const plan = this.plan(); // one plan for every stem, so they sum to the mix
+      const plan = this.plan(); // shared timing and mix settings for every soloed stem
       for (let i = 0; i < plates.length; i++) {
         if (onProgress) onProgress(i, plates.length, plates[i].name, 0);
         const buf = await this.render(plates[i], plan, onProgress ? (f: number) => onProgress(i, plates.length, plates[i].name, f) : null);
-        files.push({ name: `${plates[i].name}.wav`, data: encodeWav(buf) });
+        await new Promise<void>((r) => setTimeout(r, 0));
+        const wav = encodeWav(buf);
+        files.push({ name: `${plates[i].name}.wav`, data: new Blob([wav], { type: 'audio/wav' }), crc: crc32(wav) });
       }
       const blob = zip(files);
       const name = `${this.baseName(plan)}-stems.zip`;
-      this.last = { name, blob, files: files.map((f) => f.name), from: this.describe(plan) };
       if (save) download(blob, name);
-      return this.last;
+      return { name, blob, files: files.map((f) => f.name), from: this.describe(plan) };
     } finally { this.busy = false; }
   },
 
-  encodeWav, zip, crc32, foldLoop,
+  encodeWav, zip, crc32,
 };
 
 function peakOf(buf: AudioBuffer): number {

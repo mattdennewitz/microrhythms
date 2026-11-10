@@ -82,6 +82,10 @@ export interface FlightEngine {
     extra?: { sensor: boolean; dist: number } | null): void;
 }
 
+// AS PLAYED: at most 4 phrases × 32 bars × 4 beats = 512 beats from PLAY,
+// plus a 4 s tail (at most 16 beats at 240 BPM).
+const REPLAY_BEATS = 528;
+
 const wrapPi = (a: number) => a - TAU * Math.round(a / TAU);
 const norm = (a: number[]) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -181,11 +185,11 @@ export const flight = {
     this.hist.push({ t0: engine.horizon(), mode, ap: Object.assign({}, this.ap), blend: this.copyBlend() });
   },
   recordSample(t: number): void {
+    if (engine.beatAt(t) > REPLAY_BEATS) return;
     const pose = this.pose();
     const tr = this.track;
     if (tr.length && t <= tr[tr.length - 1].t) return;
     tr.push({ t, pos: this.pos.slice(), fwd: pose.fwd, up: pose.up });
-    if (tr.length > 200000) tr.splice(0, tr.length - 200000);
   },
   histAt(t: number): HistSeg {
     const h = this.hist;
@@ -201,10 +205,11 @@ export const flight = {
     const posB = this.predict(tb);
     E.shipWin = { ta, tb, posA, posB };
     E.sensorCursor = { t: tb, pos: posB };
-    const k = this.knots;
-    if (!k.length || k[k.length - 1].t < ta - 1e-9) k.push({ t: ta, pos: posA });
-    k.push({ t: tb, pos: posB });
-    if (k.length > 400000) k.splice(0, k.length - 400000);
+    if (Ba <= REPLAY_BEATS) {
+      const k = this.knots;
+      if (!k.length || k[k.length - 1].t < ta - 1e-9) k.push({ t: ta, pos: posA });
+      k.push({ t: tb, pos: posB });
+    }
   },
   /** Live ship position as the scheduler sees it. */
   liveShipAt(t: number): number[] {
@@ -292,7 +297,10 @@ export const flight = {
   predict(t: number): number[] {
     if (this.autopilot) return this.apPos(t);
     const dt = clamp(t - this.tNow, -0.5, 0.5);
-    return [this.pos[0] + this.vel[0] * dt, this.pos[1] + this.vel[1] * dt, this.pos[2] + this.vel[2] * dt];
+    if (dt <= 0) return [this.pos[0] + this.vel[0] * dt, this.pos[1] + this.vel[1] * dt, this.pos[2] + this.vel[2] * dt];
+    const { a, k } = this.manualAccel();
+    const decay = (1 - Math.exp(-k * dt)) / k;
+    return this.pos.map((p, i) => p + (a[i] / k) * dt + (this.vel[i] - a[i] / k) * decay);
   },
 
   // ------------------------------------------------------------ control
@@ -408,6 +416,22 @@ export const flight = {
     this.tNow = t;
     this.cursor = null;
     if (engine.playing) this.histStart(); // a new PLAY: start recording the flight
+    else {
+      // A transport pause must not export a different coast on every click.
+      this.vel.fill(0);
+      this.keys.clear();
+    }
+  },
+
+  /** Shared thrust and damping for live integration and lookahead prediction. */
+  manualAccel(): { a: number[]; k: number } {
+    const keys = this.keys, f = this.heading();
+    const right = norm(cross(f, [0, 1, 0])), up = cross(right, f);
+    const ax = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
+    const st = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
+    const vt = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0);
+    const acc = 1.6 * this.thrust * (keys.has('shift') ? 3 : 1);
+    return { a: f.map((v, i) => (v * ax + right[i] * st + up[i] * vt) * acc), k: keys.has('x') ? 9 : 1.4 };
   },
 
   /** Per frame: integrate manual physics on the clock, update the view pose. */
@@ -423,16 +447,9 @@ export const flight = {
       const a = 1 - Math.exp(-3 * dt); // same smoothing at any frame rate
       this.fwdSmooth = norm(lerp3(this.fwdSmooth, n, a));
     } else {
-      const k = this.keys;
-      const f = this.heading();
-      const right = norm(cross(f, [0, 1, 0]));
-      const up = cross(right, f);
-      const ax = (k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0);
-      const st = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
-      const vt = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
-      const acc = 1.6 * this.thrust * (k.has('shift') ? 3 : 1);
-      for (let i = 0; i < 3; i++) this.vel[i] += (f[i] * ax + right[i] * st + up[i] * vt) * acc * dt;
-      const damp = Math.exp(-(k.has('x') ? 9 : 1.4) * dt);
+      const { a, k } = this.manualAccel();
+      for (let i = 0; i < 3; i++) this.vel[i] += a[i] * dt;
+      const damp = Math.exp(-k * dt);
       for (let i = 0; i < 3; i++) { this.vel[i] *= damp; this.pos[i] += this.vel[i] * dt; }
       if (engine.playing) this.recordSample(t);
     }
@@ -475,15 +492,19 @@ export const flight = {
       sensorGain: this.sensorGain, useChance: this.useChance };
   },
 
-  /** A frozen copy of the flight for an export of what PLAY plays (song from bar 1;
-   *  export time tOff = 0 is the downbeat of bar 1).
-   *  - Autopilot, stopped: the paused path resumes when PLAY starts the song, so the
-   *    ship moves exactly as it will after you press play.
+  /** LOOP freezes the current ship pose, whether playing or stopped.
+   *  AS PLAYED (the default) renders what PLAY plays from bar 1:
+   *  - Autopilot, stopped: the paused path resumes when PLAY starts the song.
    *  - Autopilot, playing: the path as it has run since this PLAY.
-   *  - By hand: the ship where it is (coasting to a stop if it's still drifting). */
-  exportCtx(): ExportFlightCtx {
+   *  - By hand: the ship where it is (coasting to a stop if still drifting). */
+  exportCtx(mode: 'loop' | 'tail' = 'tail'): ExportFlightCtx {
     const E = engine;
     const base = { headMix: this.headMix, falloff: this.falloff, R: this.R, sensorGain: this.sensorGain, useChance: this.useChance };
+    if (mode === 'loop') {
+      const current = this.pose();
+      const pose: Pose = { pos: current.pos.slice(), fwd: current.fwd.slice(), up: current.up.slice() };
+      return Object.assign(base, { moving: false, shipAt: () => pose.pos, poseAt: () => pose, where: 'at the captured ship position' });
+    }
     const lookYaw = this.autopilot ? this.lookYaw : 0, lookPitch = this.autopilot ? this.lookPitch : 0;
     const frameAt = (a: number[], b: number[]): Pose => {
       let f = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
@@ -578,7 +599,10 @@ export const flight = {
     if (minDx > R) return;
     const rLo = Math.max(0.05, p.rIn - R), rHi = p.rOut + R;
     if (Math.max(A.r, B.r) < rLo || Math.min(A.r, B.r) > rHi) return;
-    if (Math.min(A.r, B.r) < 0.05) return; // angle is meaningless on the axis
+    const dy = posB[1] - posA[1], dz = posB[2] - posA[2];
+    const d2 = dy * dy + dz * dz;
+    const s = d2 === 0 ? 0 : clamp(-(posA[1] * dy + posA[2] * dz) / d2, 0, 1);
+    if (Math.hypot(posA[1] + s * dy, posA[2] + s * dz) < 0.05) return; // angle is meaningless on the axis
     const thB = A.th + wrapPi(B.th - A.th);
     const psiA = seg.phi0 + seg.w * (sa - seg.b0) - A.th;
     const psiB = seg.phi0 + seg.w * (sb - seg.b0) - thB;

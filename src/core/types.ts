@@ -13,6 +13,8 @@ export interface Sound {
   onsets: number[];
   /** Reversed copy of `buffer`, built on demand. */
   rev?: AudioBuffer;
+  /** Import was longer than the 90 s limit; only the start was kept. */
+  truncated?: true;
 }
 
 export type FxType = 'ratchet' | 'stutter' | 'reverse' | 'throw';

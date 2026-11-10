@@ -13,20 +13,7 @@ export function startLoop(canvas: HTMLCanvasElement) {
     const E = engine, V = view;
     const tv = E.playing ? E.visualTime() : 0;
 
-    // consume due visual events → flashes + per-plate counters
-    // (events are grouped per plate per tick, so not globally sorted)
-    if (E.events.length) {
-      const pending = [];
-      for (const ev of E.events) {
-        if (ev.t <= tv) {
-          if (ev.t > ev.chip.lastFire) ev.chip.lastFire = ev.t;
-          if (ev.t > ev.plate.lastFire) ev.plate.lastFire = ev.t;
-          if (ev.sensor && !(ev.plate.lastSensor > ev.t)) ev.plate.lastSensor = ev.t;
-          ev.plate.fireCount++;
-        } else pending.push(ev);
-      }
-      E.events = pending;
-    }
+    E.consumeEvents(tv);
 
     if (flight.on) flight.update(tv);
     V.updateCamera(now / 1000);

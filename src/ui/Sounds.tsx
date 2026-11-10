@@ -1,10 +1,10 @@
 /* Sound library list, the selected plate's sample pool, and the fragment map. */
 import { useEffect, useRef } from 'react';
-import { stack, type Plate } from '../core/stack';
+import { stack, type Plate, type Fragment } from '../core/stack';
 import { sounds } from '../core/sounds';
 import { engine } from '../core/engine';
 import { view } from '../core/view';
-import type { Sound } from '../core/types';
+import type { Chip, Sound } from '../core/types';
 import { app } from '../app/controller';
 import { onFrame } from '../app/store';
 
@@ -73,6 +73,8 @@ export function FragmentMap() {
     const cv = ref.current;
     if (!cv) return;
     let frame = 0, cssW = 0, sig = '';
+    let chips: Chip[] | null = null;
+    const fragments = new Map<Chip, Fragment>();
     const bg = document.createElement('canvas');
     return onFrame((tv) => {
       if (app.panelHidden) return;
@@ -95,16 +97,22 @@ export function FragmentMap() {
       const rowOf = new Map<number, number>();
       pool.slice(0, rows).forEach((s, r) => rowOf.set(s.id, r));
       // static layer (waveforms, cut markers, labels) rebuilt only when it changes
-      const nextSig = `${p.index}|${pool.slice(0, rows).map((s) => s.id + p.cutModeFor(s)).join(',')}|${p.slices}|${W}x${H}`;
+      const nextSig = `${p.index}|${pool.map((s) => s.id + p.cutModeFor(s)).join(',')}|${p.slices}|${p.grainMs}|${p.spread}|${p.transpose}|${W}x${H}`;
+      if (chips !== p.chips) { chips = p.chips; sig = ''; }
       if (sig !== nextSig) {
         sig = nextSig;
+        fragments.clear();
+        for (const c of p.chips) {
+          const s = pool[c.srcPick % pool.length];
+          if (s && rowOf.has(s.id)) fragments.set(c, p.fragmentFor(c, s));
+        }
         bg.width = W; bg.height = H;
         const bgc = bg.getContext('2d');
         if (bgc) drawMapBg(bgc, p, pool, rows, W, rh, dpr);
       }
       g.clearRect(0, 0, W, H);
       g.drawImage(bg, 0, 0);
-      drawMapChips(g, p, pool, rowOf, W, rh, dpr, tv);
+      drawMapChips(g, p, pool, rowOf, fragments, W, rh, dpr, tv);
     });
   }, []);
   return <canvas id="map" className="map" height={150} aria-hidden="true" ref={ref} />;
@@ -135,12 +143,13 @@ function drawMapBg(g: CanvasRenderingContext2D, p: Plate, pool: Sound[], rows: n
   }
 }
 
-function drawMapChips(g: CanvasRenderingContext2D, p: Plate, pool: Sound[], rowOf: Map<number, number>, W: number, rh: number, dpr: number, tv: number) {
+function drawMapChips(g: CanvasRenderingContext2D, p: Plate, pool: Sound[], rowOf: Map<number, number>, fragments: Map<Chip, Fragment>, W: number, rh: number, dpr: number, tv: number) {
   for (const c of p.chips) {
     const s = pool[c.srcPick % pool.length];
     if (!s || !rowOf.has(s.id)) continue;
     const r = rowOf.get(s.id)!;
-    const f = p.fragmentFor(c, s);
+    const f = fragments.get(c);
+    if (!f) continue;
     const len = s.buffer.duration;
     const x = f.offset / len * W, w = Math.max(1.5 * dpr, f.srcDur / len * W);
     const k = engine.playing && c.lastFire <= tv ? Math.exp(-(tv - c.lastFire) / 0.15) : 0;

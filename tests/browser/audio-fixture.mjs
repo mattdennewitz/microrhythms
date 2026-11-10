@@ -51,7 +51,7 @@ export async function setup(page, options = {}) {
       check(data.size % fmt.blockAlign === 0, 'Partial PCM frame');
       const frames = data.size / fmt.blockAlign, onsets = [];
       const mergeFrames = Math.round(fmt.sampleRate * 0.005);
-      let lastAudible = -Infinity, peak = 0, hashA = 0x811c9dc5, hashB = 0x9e3779b9;
+      let firstAudible = -1, lastAudible = -Infinity, peak = 0, hashA = 0x811c9dc5, hashB = 0x9e3779b9;
       for (let frame = 0, pos = data.start; frame < frames; frame++) {
         let amplitude = 0;
         for (let channel = 0; channel < fmt.channels; channel++, pos += 3) {
@@ -65,10 +65,14 @@ export async function setup(page, options = {}) {
         }
         peak = Math.max(peak, amplitude);
         if (amplitude > 1e-5) {
+          if (firstAudible < 0) firstAudible = frame;
           if (frame - lastAudible > mergeFrames) onsets.push(frame / fmt.sampleRate);
           lastAudible = frame;
         }
       }
+      // A continuously warmed loop can cut one burst across its file seam.
+      // Count that circular burst once, retaining its real late-file onset.
+      if (onsets.length > 1 && firstAudible + frames - lastAudible <= mergeFrames) onsets.shift();
       return {
         frames, sampleRate: fmt.sampleRate, channels: fmt.channels, bits: fmt.bits,
         format: fmt.format, blockAlign: fmt.blockAlign, onsets, peak,
@@ -90,7 +94,7 @@ export async function setup(page, options = {}) {
       for (let index = 0; index < count; index++) {
         check(local + 30 <= centralStart && central + 46 <= end, 'Truncated ZIP headers');
         check(v.getUint32(local, true) === 0x04034b50 && v.getUint32(central, true) === 0x02014b50, 'Invalid ZIP member signatures');
-        check(v.getUint16(local + 6, true) === 0 && v.getUint16(central + 8, true) === 0, 'Unexpected ZIP flags');
+        check(v.getUint16(local + 6, true) === 0x0800 && v.getUint16(central + 8, true) === 0x0800, 'Expected UTF-8 ZIP names');
         check(v.getUint16(local + 8, true) === 0 && v.getUint16(central + 10, true) === 0, 'ZIP member is not stored');
         check(v.getUint16(central + 34, true) === 0 && v.getUint32(central + 42, true) === local, 'Invalid ZIP member disk/offset');
         const size = v.getUint32(local + 18, true), crc = v.getUint32(local + 14, true);
@@ -131,7 +135,6 @@ export async function setup(page, options = {}) {
       engine.setBpm(bpm);
       exporter.phrases = phrases;
       exporter.mode = mode;
-      exporter.last = null;
       stack.plates.forEach((plate, index) => {
         Object.assign(plate, {
           name: `Timing ${index + 1}`, seed: 42, steps: 4, tracks: 1, cycle, dir: 1,
@@ -144,6 +147,7 @@ export async function setup(page, options = {}) {
         plate.overrides.clear();
         for (let cell = 0; cell < 4; cell++) plate.overrides.set(cell, true);
         plate.generate();
+        plate.phiFrozen = plate.phase0;
         plate.startMotion();
       });
       window.MR.app.syncAll();
@@ -152,14 +156,12 @@ export async function setup(page, options = {}) {
       const result = await window.MR.exporter.exportWav({ save: false, ...options });
       check(result !== null, 'WAV export did not complete');
       const measured = { name: result.name, measurement: measureWav(result.wav) };
-      window.MR.exporter.last = null;
       return measured;
     }
     async function stems(options = {}) {
       const result = await window.MR.exporter.exportStems({ save: false, ...options });
       check(result !== null, 'Stem export did not complete');
       const measured = { name: result.name, members: await measureZip(result.blob) };
-      window.MR.exporter.last = null;
       return measured;
     }
     window.audioFixture = { setup: configure, measureWav, measureZip, wav, stems };

@@ -93,8 +93,10 @@ fields. The ship is a **moving read head**:
 - Landing remembers where you were: take off again and the flight resumes from the same
   position, heading and mode (and autopilot phase). **↺ RESTART PATH** starts over at the
   first plate.
-- Exports render what the ship hears from bar 1; LOOP uses current project BPM,
-  while AS PLAYED preserves this PLAY's tempo changes (see Output).
+- LOOP captures what the ship hears at its **current position and heading** when you
+  click export, in manual or autopilot mode, playing or stopped. AS PLAYED instead
+  renders the performance from PLAY bar 1 with its recorded flight and tempo history
+  (see Output).
 
 ## Fragments
 
@@ -108,24 +110,46 @@ fields. The ship is a **moving read head**:
 
 ## Output
 
-**EXPORT WAV** renders the song from bar 1 (1, 2 or 4 phrases). **LOOP** uses the
-current project BPM captured when export starts, regardless of earlier playback
-tempos. Its length is exactly the selected bar count at that BPM, rounded to the
-nearest audio frame. The rendered reverb/delay tail folds onto the start for seamless
-looping, so bar 1 already carries the previous pass's tail. Fractional BPM is preserved
-in LOOP filenames.
+**EXPORT WAV** renders 1, 2 or 4 phrases in the selected mode. **LOOP** creates a
+fresh window from your **current position and plate pattern at the export click**,
+not the beginning of an earlier performance. It captures each plate's current phase
+and active speed, the current ship/listener position and orientation, flight
+parameters, and current project BPM. In flight, the ship stays at that captured
+pose for the loop: manual or autopilot, playing or stopped. Fly somewhere else and
+the next export captures that new place; it does not replay or continue a flight path.
 
-**AS PLAYED** (default) replays this PLAY's recorded tempo changes while playing;
-when stopped it uses current project BPM. It appends four seconds of reverb/delay
-tail and is not an exact-length loop. Chance rolls are deterministic per beat. Both
-modes preserve beat-based plate motion and the ship/listener snapshot: in flight,
-exports render sensor hits, proximity mix and the listener at the ship.
+LOOP's length is exactly the selected bar count at the captured BPM, rounded to the
+nearest audio frame, regardless of earlier playback tempos. The window's chance
+rolls and grain/source/FX choices are captured once and repeated through one
+continuous, warmed audio graph. Grains, CHOKE, reverb, delay and dynamics therefore
+carry across the loop boundary; the export is not a one-shot with its processed
+tail added onto the beginning. LOOP repeats this local window even when plate
+cycles do not divide its bar count. Fractional BPM is preserved in LOOP filenames;
+`from1` means local output bar 1, not PLAY's original bar 1.
 
-**STEMS .ZIP** renders one WAV per audible plate from the same timing plan. BPM,
-bar count and mode stay fixed throughout an in-flight mix or stem export; changes
-to those settings apply to the next export. This does not freeze every sound or
-plate/mix edit. Mixes and stems are 24-bit / 48 kHz; tempo is stored in projects and
-export filenames, not a WAV tempo field.
+**AS PLAYED** (default) renders the performance from **PLAY's bar 1**, preserving
+recorded tempo changes and plate/flight motion history while playing. When stopped
+it follows the next PLAY at the current project BPM. It appends four seconds of
+reverb/delay tail and is not an exact-length loop. Chance rolls are deterministic
+per beat. In flight, both modes include sensor hits and proximity mix, but only
+AS PLAYED follows the performance's flight path.
+
+Stopping playback freezes the displayed plate positions without a latency jump,
+stops manual-flight inertia and clears held flight keys. Manual lookahead accounts
+for thrust and damping. Flight replay retains the beginning needed by the maximum
+AS PLAYED export (512 beats plus up to 16 beats of tail), rather than discarding it
+during long sessions.
+
+**STEMS .ZIP** renders one WAV per audible plate. BPM, bar count, mode, master,
+space, throw wet and plate levels are captured once for the mix or all its stems;
+changes apply to the next export. LOOP also captures its events, plate motion,
+ship/listener pose and flight parameters. AS PLAYED does not freeze sound buffers
+or pattern edits made mid-export. Each stem keeps its own master dynamics, like
+soloing that plate, so summed stems need not null against the mix.
+
+Mixes and stems are 24-bit / 48 kHz; tempo is stored in projects and filenames,
+not a WAV tempo field. Progress distinguishes rendering from encoding. Stem ZIP
+member names use UTF-8, and completed exports are not retained by the exporter.
 
 ## Projects
 
@@ -182,7 +206,9 @@ denied, copy the address-bar URL after it updates.
 ## Your own sounds
 
 - **＋ ADD SOUNDS** or drop audio files anywhere (wav/mp3/ogg/flac/m4a/aif).
-  Files are mono-ised, silence-trimmed, normalised and capped at 90 s.
+  Files are mono-ised, silence-trimmed, normalised and capped at 90 s. If stereo
+  channels substantially cancel, the loudest channel is used instead. Longer
+  imports keep the first 90 s and the import notice says **first 90 s used**.
 - **● REC MIC** records up to 20 s from the microphone.
 - **⟲ RESAMPLE 4s** captures the machine's own output as a new source.
 - **CLEAR ALL** removes all imported/recorded/resampled sounds and turns every
@@ -252,7 +278,7 @@ src/core/stack.ts         plates, chips, styles, breaks, FX, cut modes, snapshot
 src/core/sounds.ts        synthesized built-ins, sample library, decoding, onsets
 src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
 src/core/history.ts       undo / redo snapshots
-src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
+src/core/exporter.ts      WAV encoder, ZIP writer, captured export plans and actions
 src/core/project.ts       versioned save / open the whole machine as JSON
 src/core/project-format.ts strict Zod schemas for project files and share links
 src/core/project-limits.ts shared sound budgets and Zod label schema
@@ -310,7 +336,9 @@ The Node suite does not exercise React DOM or Web Audio. `test:audio` uses the r
 development app and OfflineAudioContext in Chromium: the complete supported LOOP
 length/tempo matrix for mix and stems, PCM onset timing, tempo history, in-flight
 snapshots and delay, project/share restoration, rounding/tails, mute/solo/silence,
-and UI downloads. It runs sequentially in isolated contexts without retries.
+cyclic CHOKE/FX boundaries, current-position/current-phase captures in manual and
+autopilot flight while playing or stopped, preserved AS PLAYED history, and UI
+downloads. It runs sequentially in isolated contexts without retries.
 Measurements and UI screenshots are written under `test-results/`.
 
 GitHub Actions runs independent `Tests` and `Audio` jobs on every push and pull

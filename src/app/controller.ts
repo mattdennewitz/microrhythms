@@ -241,7 +241,7 @@ export const app = {
   setExportPhrases(n: number) { exporter.phrases = n; this.exportStatus = null; notify(); },
   setExportMode(m: typeof exporter.mode) { exporter.mode = m; notify(); },
   exportSummary() {
-    return `${exporter.phrases * stack.phraseBars} bars · ${exporter.seconds().toFixed(1)} s · ${exporter.mode === 'loop' ? 'current project BPM, from bar 1' : 'what PLAY plays, from bar 1'} · 24-bit 48 kHz`;
+    return `${exporter.phrases * stack.phraseBars} bars · ${exporter.seconds().toFixed(1)} s · ${exporter.mode === 'loop' ? 'current position & pattern at click, current project BPM' : 'performance from PLAY bar 1, plus 4 s tail'} · 24-bit 48 kHz`;
   },
   async runExport(kind: 'wav' | 'stems') {
     if (exporter.busy) { this.toast('an export is already rendering'); this.announce('an export is already rendering'); return; }
@@ -249,6 +249,10 @@ export const app = {
     let lastPct = -1;
     const status = (s: string) => { this.exportStatus = s; notify(); };
     const progress = (i: number, n: number, name: string, f?: number) => {
+      if (f === 1) {
+        status(kind === 'wav' ? 'encoding mix…' : `encoding stem ${i + 1}/${n} · ${name}…`);
+        return;
+      }
       const pct = Math.floor(((i + (f || 0)) / n) * 100);
       if (pct === lastPct) return;
       lastPct = pct;
@@ -333,7 +337,7 @@ export const app = {
         try {
           const snd = await sounds.addFile(f, generation);
           if (generation !== sounds.generation || !snd) break;
-          this.toast(`${snd.name} (${snd.buffer.duration.toFixed(1)}s · ${snd.onsets.length} onsets) → all plates`);
+          this.toast(`${snd.name} (${snd.buffer.duration.toFixed(1)}s · ${snd.onsets.length} onsets) → all plates${snd.truncated ? ' · first 90 s used' : ''}`);
         } catch (err) {
           if (generation !== sounds.generation) break;
           const silent = /silent/.test((err as Error | null)?.message || '');

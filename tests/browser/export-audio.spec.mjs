@@ -58,25 +58,28 @@ for (const bpm of [112, 137.5]) {
       const result = await page.evaluate(async ({ bpm, beats, sampleRate }) => {
         const { engine, exporter } = window.MR;
         const raw = await engine.renderOffline({ bpm, beats, tail: 4, sampleRate, trace: true });
-        const folded = exporter.foldLoop(raw, raw.loopSeconds);
+        const loop = await engine.renderOffline({ bpm, beats, loop: true, sampleRate, trace: true });
         return {
           raw: window.audioFixture.measureWav(exporter.encodeWav(raw)),
-          folded: window.audioFixture.measureWav(exporter.encodeWav(folded)),
+          loop: window.audioFixture.measureWav(exporter.encodeWav(loop)),
           starts: raw.trace.map((voice) => voice.start),
+          loopStarts: loop.trace.map((voice) => voice.start),
           loopSeconds: raw.loopSeconds,
         };
       }, { bpm, beats, sampleRate });
       assert.equal(result.raw.frames, Math.ceil((seconds + 4) * sampleRate));
       assertTiming(result.raw, { bpm, bars, sampleRate, tail: true });
-      assertTiming(result.folded, { bpm, bars, sampleRate });
+      assertTiming(result.loop, { bpm, bars, sampleRate });
       assert.ok(Math.abs(result.loopSeconds - seconds) <= 1 / sampleRate);
-      assert.equal(result.starts.length, beats, 'one real scheduled grain per beat, excluding endpoint');
-      for (let beat = 0; beat < beats; beat++) {
-        assert.ok(Math.abs(result.starts[beat] - beat * 60 / bpm) <= 1 / sampleRate,
-          `trace beat ${beat}: expected ${beat * 60 / bpm}s, actual ${result.starts[beat]}s`);
-        assert.ok(result.starts[beat] < seconds, 'exclusive endpoint has no grain');
+      for (const starts of [result.starts, result.loopStarts]) {
+        assert.equal(starts.length, beats, 'one scheduled grain per beat, excluding endpoint');
+        for (let beat = 0; beat < beats; beat++) {
+          assert.ok(Math.abs(starts[beat] - beat * 60 / bpm) <= 1 / sampleRate,
+            `trace beat ${beat}: expected ${beat * 60 / bpm}s, actual ${starts[beat]}s`);
+          assert.ok(starts[beat] < seconds, 'exclusive endpoint has no grain');
+        }
       }
-      recordTiming(result.folded, { bpm, bars, sampleRate });
+      recordTiming(result.loop, { bpm, bars, sampleRate });
     });
   }
 }
@@ -105,7 +108,7 @@ for (const bpm of [30, 112, 240]) {
   }
 }
 
-test('space-enabled LOOP folds the real rendered tail into its exact frame count', async ({ page }) => {
+test('space-enabled LOOP keeps its exact frame count with continuous effects', async ({ page }) => {
   const bpm = 112, bars = 4;
   await setup(page, { bpm });
   const result = await page.evaluate(async () => {
