@@ -176,6 +176,12 @@ denied, copy the address-bar URL after it updates.
   Files are mono-ised, silence-trimmed, normalised and capped at 90 s.
 - **● REC MIC** records up to 20 s from the microphone.
 - **⟲ RESAMPLE 4s** captures the machine's own output as a new source.
+- **CLEAR ALL** removes all imported/recorded/resampled sounds and turns every
+  **BUILT-IN** off in one click, without changing patterns or layer settings.
+  Clearing cancels pending sound additions and stops captures; you can add new
+  sounds afterward.
+  Removed user sounds are not undoable; add them again to restore them.
+  Built-ins stay in the library and can be re-enabled with **BUILT-INS**.
 
 New sounds feed every plate immediately; the rhythms stay as they are and only the
 fragments change. Use the **SAMPLES FROM** chips in the layer section to choose which
