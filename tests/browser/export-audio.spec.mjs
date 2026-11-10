@@ -25,8 +25,11 @@ for (const kind of ['mix WAV', 'one-stem ZIP']) {
       for (const phrases of phraseCounts) {
         for (const bpm of tempos) {
           const bars = phraseBars * phrases;
+          // Keep short tempo boundaries in the PR gate; sweep combinations separately.
+          const fast = phraseBars === 4 && phrases === 1 && [30, 137.5, 240].includes(bpm);
+          const tag = fast ? [] : bars * 4 * 60 / bpm >= 128 ? ['@large'] : ['@extended'];
           const tempoLabel = Number.isInteger(bpm) ? `${bpm} BPM` : `fractional BPM ${bpm}`;
-          test(`${phraseBars} bars × ${phrases} phrases at ${tempoLabel}`, async ({ page }) => {
+          test(`${phraseBars} bars × ${phrases} phrases at ${tempoLabel}`, { tag }, async ({ page }) => {
             await setup(page, { bpm, phraseBars, phrases });
             const result = await page.evaluate(async (format) => format === 'mix WAV'
               ? window.audioFixture.wav() : window.audioFixture.stems(), kind);

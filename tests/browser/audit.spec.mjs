@@ -175,7 +175,7 @@ test('audit UI paints encoding before saving a WAV', async ({ page }, testInfo) 
   assert.ok(statuses.findIndex(s => s === 'encoding mix…') < statuses.findIndex(s => s.startsWith('saved ')));
 });
 
-test('audit maximum LOOP WAV download is complete', async ({ page }) => {
+test('audit maximum LOOP WAV download is complete', { tag: '@large' }, async ({ page }) => {
   await setup(page, { phraseBars: 32, phrases: 4, bpm: 30 });
   const pending = page.waitForEvent('download');
   await page.locator('#btn-export-wav').click();

@@ -128,7 +128,8 @@ async function attach(info, name, data) {
 for (const autopilot of [false, true]) {
   for (const playing of [false, true]) {
     for (const kind of ['mix', 'stems']) {
-      test(`fresh current position: ${autopilot ? 'autopilot' : 'manual'} ${playing ? 'playing' : 'stopped'} A then B ${kind} identifies the NEW source`, async ({ page }, info) => {
+      const tag = (!autopilot && playing && kind === 'mix') || (autopilot && !playing && kind === 'stems') ? [] : ['@extended'];
+      test(`fresh current position: ${autopilot ? 'autopilot' : 'manual'} ${playing ? 'playing' : 'stopped'} A then B ${kind} identifies the NEW source`, { tag }, async ({ page }, info) => {
         const fixture = await spatialFixture(page, { autopilot, playing });
         const a = await page.evaluate((kind) => window.positionFixture.capture(kind), kind);
         const positionB = await page.evaluate(() => window.positionFixture.move(1));
@@ -146,7 +147,8 @@ for (const autopilot of [false, true]) {
 for (const autopilot of [false, true]) {
   for (const playing of [false, true]) {
     for (const kind of ['mix', 'stems']) {
-      test(`moving current pose: ${autopilot ? 'autopilot' : 'manual'} ${playing ? 'playing' : 'stopped'} ${kind} does not continue the route or coast`, async ({ page }, info) => {
+      const tag = (!autopilot && playing && kind === 'mix') || (autopilot && !playing && kind === 'stems') ? [] : ['@extended'];
+      test(`moving current pose: ${autopilot ? 'autopilot' : 'manual'} ${playing ? 'playing' : 'stopped'} ${kind} does not continue the route or coast`, { tag }, async ({ page }, info) => {
         await spatialFixture(page, { autopilot, playing });
         const result = await page.evaluate(async ({ autopilot, kind }) => {
           const { flight } = window.MR;
@@ -170,7 +172,8 @@ for (const autopilot of [false, true]) {
 
 for (const autopilot of [false, true]) {
   for (const kind of ['mix', 'stems']) {
-    test(`current pose snapshot: ${autopilot ? 'autopilot' : 'manual'} ${kind} freezes movement, orientation, proximity and sensor edits`, async ({ page }, info) => {
+    const tag = autopilot === (kind === 'stems') ? [] : ['@extended'];
+    test(`current pose snapshot: ${autopilot ? 'autopilot' : 'manual'} ${kind} freezes movement, orientation, proximity and sensor edits`, { tag }, async ({ page }, info) => {
       await spatialFixture(page, { autopilot, playing: true });
       const result = await page.evaluate(async (kind) => {
         const { flight, exporter } = window.MR;

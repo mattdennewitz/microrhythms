@@ -324,7 +324,10 @@ npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
 npm run typecheck  # tsc, including Vite and Cloudflare configuration
 npm test           # dependency-free core regression tests using Node's TS support
 npx playwright install chromium # once; Linux CI uses --with-deps chromium
-npm run test:audio  # real Chromium offline audio and output-control downloads
+npm run test:audio          # fast real-audio PR regressions
+npm run test:audio:extended # additional combinations (weekly/manual)
+npm run test:audio:large    # long renders and maximum-size downloads (opt-in)
+npm run test:audio:full     # every browser audio case (release/broad audio changes)
 npm run build      # typecheck + production build into .cloudflare/output/v0
 npm run preview    # serve the last production build locally (build first)
 ```
@@ -332,19 +335,42 @@ npm run preview    # serve the last production build locally (build first)
 The core tests cover deterministic helpers and plates, JSON snapshots,
 stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
 validation, bounded share-link roundtrips and canvas picking after viewport pan/scale.
-The Node suite does not exercise React DOM or Web Audio. `test:audio` uses the real
-development app and OfflineAudioContext in Chromium: the complete supported LOOP
-length/tempo matrix for mix and stems, PCM onset timing, tempo history, in-flight
-snapshots and delay, project/share restoration, rounding/tails, mute/solo/silence,
-cyclic CHOKE/FX boundaries, current-position/current-phase captures in manual and
-autopilot flight while playing or stopped, preserved AS PLAYED history, and UI
-downloads. It runs sequentially in isolated contexts without retries.
-Measurements and UI screenshots are written under `test-results/`.
+The Node suite does not exercise React DOM or Web Audio. Browser audio tests use
+the real development app and OfflineAudioContext in Chromium, sequentially in
+isolated contexts without retries. No audio mocks replace rendering or downloads.
+
+`test:audio` is the default PR gate: short tempo-boundary mix/stem exports, PCM
+onset timing, tempo history, snapshots and delay, project/share restoration,
+rounding/tails, mute/solo/silence, cyclic CHOKE/FX boundaries, representative
+manual/autopilot current-position captures, preserved AS PLAYED history, and UI
+downloads. Snapshot regressions use a short subsequent export by default; their
+original 128-bar cases remain available in the large tier.
+
+`@extended` covers the remaining short length/tempo and flight-state combinations
+plus the supplied seven-stem UI fixture. `@large` covers matrix renders of at least
+128 musical seconds and the maximum-size download. The tiers are disjoint; `full`
+runs their union. Extended and large cases are filtered out, not skipped, in the
+default command. Measurements and UI screenshots are written under `test-results/`.
+
+Run affected checks during development rather than the full matrix after each edit:
+
+```sh
+npm test
+npm run test:audio -- tests/browser/audit.spec.mjs
+npm run test:audio -- tests/browser/loop-boundary.spec.mjs
+npm run test:audio:extended -- tests/browser/current-position-loop.spec.mjs
+```
+
+Use `test:audio:large` when changing encoding, export memory, long-duration rendering
+or download handling. Use `test:audio:full` for broad audio changes or release
+validation; it is intentionally not the ordinary PR feedback loop.
 
 GitHub Actions runs independent `Tests` and `Audio` jobs on every push and pull
 request to `main`, using Node.js 24 and `npm ci`. `Tests` runs `npm test` and the
-typechecked production build; `Audio` installs Chromium with Linux dependencies
-and runs `npm run test:audio`.
+typechecked production build; `Audio` installs Chromium and runs the fast
+`npm run test:audio` gate. The extended tier runs weekly on Monday at 06:00 UTC.
+Manual CI dispatch selects `extended`, `large`, or `full`; large renders never run
+automatically.
 Merging to `main` requires a pull request with the `Tests` check passing against the
 latest `main`; the requirement also applies to administrators. Branch protection
 is configured in GitHub repository settings, not in the workflow file.

@@ -126,7 +126,7 @@ test('cyclic event snapshot: chance, stutter and source choices survive edits be
   assert.notEqual(result.next.members[1].pcmHash, result.control.members[1].pcmHash);
 });
 
-test('supplied flight project exports real UI mix and seven-stem downloads at the configured length', async ({ page }, info) => {
+test('supplied flight project exports real UI mix and seven-stem downloads at the configured length', { tag: '@extended' }, async ({ page }, info) => {
   await setup(page);
   const names = await page.evaluate((snapshot) => {
     window.MR.project.apply(snapshot);

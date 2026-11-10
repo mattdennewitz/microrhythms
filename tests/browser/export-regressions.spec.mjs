@@ -74,10 +74,10 @@ for (const mode of ['loop', 'tail']) {
   }
 }
 
-for (const kind of ['mix', 'stems']) {
-  test(`export snapshot: ${kind} retains BPM, length and LOOP mode; next export uses edits`, async ({ page }, testInfo) => {
+for (const [kind, large] of [['mix', false], ['stems', false], ['mix', true], ['stems', true]]) {
+  test(`export snapshot: ${kind} retains BPM, length and LOOP mode; next export uses ${large ? '128-bar' : 'short'} edits`, { tag: large ? '@large' : [] }, async ({ page }, testInfo) => {
     await setup(page, { bpm: 120, phraseBars: 4, phrases: 2, mode: 'loop', audible: kind === 'stems' ? 2 : 1 });
-    const result = await page.evaluate(async (type) => {
+    const result = await page.evaluate(async ({ type, large }) => {
       const { engine, stack, exporter } = window.MR;
       const names = stack.plates.filter((plate) => !plate.mute).map((plate) => `${plate.name}.wav`);
       let changed = false;
@@ -86,8 +86,8 @@ for (const kind of ['mix', 'stems']) {
         if (changed || (type === 'stems' && (index !== 0 || fraction !== 1))) return;
         changed = true;
         engine.setBpm(60);
-        stack.phraseBars = 32;
-        exporter.phrases = 4;
+        stack.phraseBars = large ? 32 : 4;
+        exporter.phrases = large ? 4 : 1;
         exporter.mode = 'tail';
       };
       const exported = type === 'mix'
@@ -99,21 +99,22 @@ for (const kind of ['mix', 'stems']) {
         : { name: exported.name, members: await window.audioFixture.measureZip(exported.blob) };
       return { ...measured, changed, names, busy: exporter.busy,
         current: { bpm: engine.bpm, phraseBars: stack.phraseBars, phrases: exporter.phrases, mode: exporter.mode } };
-    }, kind);
+    }, { type: kind, large });
     await evidence(testInfo, 'in-flight-export-pcm', result, { bpm: 120, bars: 8, frames: 768000, mode: 'loop' });
     expect(result.changed).toBe(true);
     expect(result.busy).toBe(false);
-    expect(result.current).toEqual({ bpm: 60, phraseBars: 32, phrases: 4, mode: 'tail' });
+    expect(result.current).toEqual({ bpm: 60, phraseBars: large ? 32 : 4, phrases: large ? 4 : 1, mode: 'tail' });
     expect(result.name).toBe(`orbital-120bpm-8bars-from1${kind === 'mix' ? '-loop.wav' : '-stems.zip'}`);
     if (kind === 'stems') expect(result.members.map((member) => member.name)).toEqual(result.names);
     for (const measurement of measurements(result, kind)) assertTiming(measurement, { bpm: 120, bars: 8 });
 
-    // Keep the edited settings: this is a real 128-bar AS PLAYED export, not a preview API assertion.
+    // Exercise the edited settings with real PCM; the 128-bar variant is opt-in.
+    const bars = large ? 128 : 4;
     const next = await exportAudio(page, kind);
-    await evidence(testInfo, 'subsequent-export-pcm', next, { bpm: 60, bars: 128, frames: 24768000, tailSeconds: 4 });
-    expect(next.name).toBe(`orbital-60bpm-128bars-from1${kind === 'mix' ? '.wav' : '-stems.zip'}`);
+    await evidence(testInfo, 'subsequent-export-pcm', next, { bpm: 60, bars, frames: (bars * 4 + 4) * SAMPLE_RATE, tailSeconds: 4 });
+    expect(next.name).toBe(`orbital-60bpm-${bars}bars-from1${kind === 'mix' ? '.wav' : '-stems.zip'}`);
     if (kind === 'stems') expect(next.members.map((member) => member.name)).toEqual(result.names);
-    for (const measurement of measurements(next, kind)) assertTiming(measurement, { bpm: 60, bars: 128, tail: true });
+    for (const measurement of measurements(next, kind)) assertTiming(measurement, { bpm: 60, bars, tail: true });
     expect(await page.evaluate(() => window.MR.exporter.busy)).toBe(false);
   });
 }

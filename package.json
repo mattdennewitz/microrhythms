@@ -10,7 +10,10 @@
     "build": "tsc --noEmit && cf build",
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/register.mjs --test tests/*.test.mjs",
-    "test:audio": "playwright test",
+    "test:audio": "playwright test --grep-invert '@extended|@large'",
+    "test:audio:extended": "playwright test --grep @extended",
+    "test:audio:large": "playwright test --grep @large",
+    "test:audio:full": "playwright test",
     "preview": "vite preview",
     "deploy": "tsc --noEmit && cf deploy"
   },
