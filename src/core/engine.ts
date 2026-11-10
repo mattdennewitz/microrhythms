@@ -98,6 +98,7 @@ interface GrainOpts {
 export interface RenderOpts {
   seconds?: number;
   beats?: number | null;
+  bpm?: number;
   tail?: number;
   onlyPlate?: Plate | null;
   seed?: number;
@@ -727,20 +728,21 @@ export const engine = {
    *  - flight:  a frozen flight context (flight.exportCtx) to replay the ship
    *  - listenerPose: static listener when not flying (default: home view)
    *  Chance uses the live roll seed, so the same beats roll the same way. */
-  async renderOffline(this: { rollSeed: number; bpm: number; buildGraph(ctx: BaseAudioContext): Graph }, { seconds, beats = null, tail = 4, onlyPlate = null, seed = this.rollSeed, sampleRate = 48000, trace = false,
+  async renderOffline(this: { rollSeed: number; bpm: number; buildGraph(ctx: BaseAudioContext): Graph }, { seconds, beats = null, bpm = this.bpm, tail = 4, onlyPlate = null, seed = this.rollSeed, sampleRate = 48000, trace = false,
     startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null, onProgress = null }: RenderOpts): Promise<RenderedBuffer> {
-    // tempo map: the played one (export while playing), else the current tempo
-    const offClock = clock || [{ t0: 0, b0: startBeat, bps: this.bpm / 60 }];
+    // An explicit clock takes precedence over the captured scalar tempo.
+    const offClock = clock || [{ t0: 0, b0: startBeat, bps: bpm / 60 }];
     if (beats != null) {
       const tmp: Engine = Object.create(engine); tmp.clock = offClock;
       seconds = tmp.timeAtBeat(startBeat + beats);
     }
     const octx = new OfflineAudioContext(2, Math.ceil((seconds! + tail) * sampleRate), sampleRate);
     const off: Engine = Object.create(engine);
+    off.bpm = bpm;
     off.ctx = octx;
     off.offline = true;
     off.playing = true;
-    Object.assign(off, this.buildGraph(octx));
+    Object.assign(off, this.buildGraph.call(off, octx));
     off.clock = offClock;
     off.motions = motions || new Map(stack.plates.map((p): [Plate, MotionSeg[]] => [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
     off.flightRender = flight;
@@ -784,7 +786,7 @@ export const engine = {
     // schedule in ~0.1 s windows like the live scheduler (keeps a moving ship's ψ
     // linear), a little ahead of the render via suspend/resume, so node count stays
     // bounded and progress can be reported
-    const B1 = off.beatAt(seconds!), chunk = 0.1 * (this.bpm / 60);
+    const B1 = off.beatAt(seconds!), chunk = 0.1 * (bpm / 60);
     let k = 0;
     const scheduleUntil = (Bt: number) => {
       const lim = Math.min(Bt, B1);

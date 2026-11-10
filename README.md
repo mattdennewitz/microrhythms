@@ -93,7 +93,8 @@ fields. The ship is a **moving read head**:
 - Landing remembers where you were: take off again and the flight resumes from the same
   position, heading and mode (and autopilot phase). **↺ RESTART PATH** starts over at the
   first plate.
-- Exports render what the ship hears from bar 1, exactly as PLAY plays it (see Output).
+- Exports render what the ship hears from bar 1; LOOP uses current project BPM,
+  while AS PLAYED preserves this PLAY's tempo changes (see Output).
 
 ## Fragments
 
@@ -107,16 +108,24 @@ fields. The ship is a **moving read head**:
 
 ## Output
 
-**EXPORT WAV** renders **what PLAY plays**: the song from bar 1 (1, 2 or 4 phrases).
-Every PLAY starts the song at bar 1, so when stopped the export is exactly what your
-next PLAY will produce; while playing it's this PLAY from bar 1. Chance rolls are
-deterministic per beat, so the export has the same hits you hear. In flight it renders
-the ship's sensor hits, the proximity mix and the listener at the ship: parked or flying
-by hand, from where you are; on autopilot, with the paused path carrying on exactly as
-it does after PLAY. **AS PLAYED** (default) keeps the reverb/delay tail at the end;
-**LOOP** folds it onto the start for seamless looping (so bar 1 then carries the tail).
-**STEMS .ZIP** renders one WAV per audible plate from the same plan. The files are
-24-bit / 48 kHz.
+**EXPORT WAV** renders the song from bar 1 (1, 2 or 4 phrases). **LOOP** uses the
+current project BPM captured when export starts, regardless of earlier playback
+tempos. Its length is exactly the selected bar count at that BPM, rounded to the
+nearest audio frame. The rendered reverb/delay tail folds onto the start for seamless
+looping, so bar 1 already carries the previous pass's tail. Fractional BPM is preserved
+in LOOP filenames.
+
+**AS PLAYED** (default) replays this PLAY's recorded tempo changes while playing;
+when stopped it uses current project BPM. It appends four seconds of reverb/delay
+tail and is not an exact-length loop. Chance rolls are deterministic per beat. Both
+modes preserve beat-based plate motion and the ship/listener snapshot: in flight,
+exports render sensor hits, proximity mix and the listener at the ship.
+
+**STEMS .ZIP** renders one WAV per audible plate from the same timing plan. BPM,
+bar count and mode stay fixed throughout an in-flight mix or stem export; changes
+to those settings apply to the next export. This does not freeze every sound or
+plate/mix edit. Mixes and stems are 24-bit / 48 kHz; tempo is stored in projects and
+export filenames, not a WAV tempo field.
 
 ## Projects
 
@@ -288,6 +297,8 @@ npm ci
 npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
 npm run typecheck  # tsc, including Vite and Cloudflare configuration
 npm test           # dependency-free core regression tests using Node's TS support
+npx playwright install chromium # once; Linux CI uses --with-deps chromium
+npm run test:audio  # real Chromium offline audio and output-control downloads
 npm run build      # typecheck + production build into .cloudflare/output/v0
 npm run preview    # serve the last production build locally (build first)
 ```
@@ -295,12 +306,18 @@ npm run preview    # serve the last production build locally (build first)
 The core tests cover deterministic helpers and plates, JSON snapshots,
 stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
 validation, bounded share-link roundtrips and canvas picking after viewport pan/scale.
-They do not exercise React DOM, browser audio playback or offline audio rendering;
-check those in a browser.
+The Node suite does not exercise React DOM or Web Audio. `test:audio` uses the real
+development app and OfflineAudioContext in Chromium: the complete supported LOOP
+length/tempo matrix for mix and stems, PCM onset timing, tempo history, in-flight
+snapshots and delay, project/share restoration, rounding/tails, mute/solo/silence,
+and UI downloads. It runs sequentially in isolated contexts without retries.
+Measurements and UI screenshots are written under `test-results/`.
 
-GitHub Actions runs the `Tests` check on every push and pull request to `main`,
-using Node.js 24, `npm ci`, `npm test`, and the typechecked production build.
-Merging to `main` requires a pull request with this check passing against the
+GitHub Actions runs independent `Tests` and `Audio` jobs on every push and pull
+request to `main`, using Node.js 24 and `npm ci`. `Tests` runs `npm test` and the
+typechecked production build; `Audio` installs Chromium with Linux dependencies
+and runs `npm run test:audio`.
+Merging to `main` requires a pull request with the `Tests` check passing against the
 latest `main`; the requirement also applies to administrators. Branch protection
 is configured in GitHub repository settings, not in the workflow file.
 

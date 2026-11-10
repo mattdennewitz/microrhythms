@@ -322,7 +322,7 @@ function Output() {
         items={[1, 2, 4].map((n) => ({ label: `${n} PHRASE${n > 1 ? 'S' : ''}`, value: n }))} />
       <Seg id="loop-row" value={exporter.mode} onPick={(v) => app.setExportMode(v)} items={[
         { label: 'AS PLAYED', value: 'tail', title: 'exactly what PLAY plays, plus 4 s of reverb/delay tail' },
-        { label: 'LOOP', value: 'loop', title: 'exact length with the tail folded onto the start (for looping; bar 1 then carries the tail)' },
+        { label: 'LOOP', value: 'loop', title: 'exact length at the current project BPM, with the tail folded onto the start' },
       ] as Array<{ label: string; value: typeof exporter.mode; title: string }>} />
       <div className="row">
         <button id="btn-export-wav" title="Render the mix from bar 1 (offline, seeded)" disabled={app.exportBusy} onClick={() => app.runExport('wav')}>⤓ EXPORT WAV</button>

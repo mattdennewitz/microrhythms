@@ -241,7 +241,7 @@ export const app = {
   setExportPhrases(n: number) { exporter.phrases = n; this.exportStatus = null; notify(); },
   setExportMode(m: typeof exporter.mode) { exporter.mode = m; notify(); },
   exportSummary() {
-    return `${exporter.phrases * stack.phraseBars} bars · ${exporter.seconds().toFixed(1)} s · what PLAY plays, from bar 1 · 24-bit 48 kHz`;
+    return `${exporter.phrases * stack.phraseBars} bars · ${exporter.seconds().toFixed(1)} s · ${exporter.mode === 'loop' ? 'current project BPM, from bar 1' : 'what PLAY plays, from bar 1'} · 24-bit 48 kHz`;
   },
   async runExport(kind: 'wav' | 'stems') {
     if (exporter.busy) { this.toast('an export is already rendering'); this.announce('an export is already rendering'); return; }

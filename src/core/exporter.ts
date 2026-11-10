@@ -12,10 +12,14 @@ export type ExportProgress = (index: number, count: number, name: string, fracti
 export interface ZipEntry { name: string; data: Uint8Array<ArrayBuffer> }
 /** Everything an export renders from; one plan serves every stem. */
 export interface ExportPlan {
+  bpm: number;
+  bars: number;
+  beats: number;
+  mode: ExportMode;
   startBeat: number;
   motions: Map<Plate, MotionSeg[]> | null;
   flight: ExportFlightCtx | null;
-  clock: ClockSeg[] | null;
+  clock: ClockSeg[];
   listenerPose: Pose | null;
 }
 export interface WavExport { name: string; wav: Uint8Array<ArrayBuffer>; length: number; sampleRate: number; peak: number; from: string }
@@ -122,35 +126,37 @@ export const exporter = {
 
   seconds(): number { return this.phrases * stack.phraseBars * 4 * 60 / engine.bpm; },
   baseName(plan?: ExportPlan | null): string {
-    const bar = plan ? Math.floor(plan.startBeat / 4) + 1 : 1;
-    return `orbital-${Math.round(engine.bpm)}bpm-${this.phrases * stack.phraseBars}bars-from${bar}${plan && plan.flight ? '-flight' : ''}`;
+    const pl = plan || this.plan();
+    const bar = Math.floor(pl.startBeat / 4) + 1;
+    const bpm = pl.mode === 'loop' ? pl.bpm : Math.round(pl.bpm);
+    return `orbital-${bpm}bpm-${pl.bars}bars-from${bar}${pl.flight ? '-flight' : ''}`;
   },
 
-  /** Render what PLAY plays: the song from bar 1. Stopped, that's exactly what the
-   *  next PLAY will produce (plates from their start, the paused ship carrying on);
-   *  playing, it's this PLAY from bar 1, with the plates as they have moved. */
+  /** Capture timing once: LOOP uses project BPM; AS PLAYED replays this PLAY's
+   *  tempo history. Both retain beat-based plate motion and the listener/ship. */
   plan(): ExportPlan {
     const E = engine, S = stack;
+    const bpm = E.bpm, bars = this.phrases * S.phraseBars, beats = bars * 4, mode = this.mode;
     const playing = E.playing && E.ctx;
     const startBeat = 0;
     const motions = playing ? new Map<Plate, MotionSeg[]>(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
     const fl = flight.on ? flight.exportCtx() : null;
-    // while playing, replay the tempo map since PLAY (offline time 0 = bar 1)
-    let clock: ClockSeg[] | null = null;
-    if (playing) {
+    // Only AS PLAYED replays the tempo map since PLAY (offline time 0 = bar 1).
+    let clock: ClockSeg[] = [{ t0: 0, b0: 0, bps: bpm / 60 }];
+    if (mode === 'tail' && playing) {
       const t0 = E.timeAtBeat(0);
       clock = E.clock.map((s: ClockSeg) => ({ t0: s.t0 - t0, b0: s.b0, bps: s.bps }));
       clock[0] = { t0: 0, b0: 0, bps: clock[0].bps };
     }
     const listenerPose = fl ? null : E.listenerPose(view);
-    return { startBeat, motions, flight: fl, clock, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
+    return { bpm, bars, beats, mode, startBeat, motions, flight: fl, clock, listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() } };
   },
 
   beats(): number { return this.phrases * stack.phraseBars * 4; },
   async render(onlyPlate: Plate | null, plan?: ExportPlan | null, onProgress?: ((f: number) => void) | null): Promise<AudioBuffer> {
     const pl = plan || this.plan();
-    const buf = await engine.renderOffline(Object.assign({ beats: this.beats(), tail: 4, onlyPlate, onProgress }, pl));
-    return this.mode === 'loop' ? foldLoop(buf, buf.loopSeconds!) : buf;
+    const buf = await engine.renderOffline({ ...pl, tail: 4, onlyPlate, onProgress });
+    return pl.mode === 'loop' ? foldLoop(buf, buf.loopSeconds!) : buf;
   },
 
   describe(plan: ExportPlan): string {
@@ -165,7 +171,7 @@ export const exporter = {
       const plan = this.plan();
       const buf = await this.render(null, plan, onProgress ? (f: number) => onProgress(0, 1, 'mix', f) : null);
       const wav = encodeWav(buf);
-      const name = `${this.baseName(plan)}${this.mode === 'loop' ? '-loop' : ''}.wav`;
+      const name = `${this.baseName(plan)}${plan.mode === 'loop' ? '-loop' : ''}.wav`;
       this.last = { name, wav, length: buf.length, sampleRate: buf.sampleRate, peak: peakOf(buf), from: this.describe(plan) };
       if (save) download(new Blob([wav], { type: 'audio/wav' }), name);
       return this.last;
