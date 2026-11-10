@@ -9,7 +9,7 @@
  * their exact beat, so they land sample-accurately on bar lines.
  */
 import { TAU, clamp, mulberry32 } from './util';
-import { stack, type Plate } from './stack';
+import { stack, type Plate, type Fragment } from './stack';
 import { sounds } from './sounds';
 import { flight, type FlightCtx, type ExportFlightCtx, type SensorCursor, type ShipWindow } from './flight';
 import { view } from './view';
@@ -17,6 +17,10 @@ import type { Chip, MotionSeg, Pose } from './types';
 
 const LOOKAHEAD = 0.12;   // seconds scheduled ahead
 const TICK_MS = 25;
+const REVERB_SECONDS = 3.4;
+const DELAY_FEEDBACK = 0.45;
+const COMP_RELEASE = 0.22;
+let tickWorkerUrl: string | null = null;
 
 /** One piece of the tempo map: from audio time t0 (song beat b0) at bps beats/s. */
 export interface ClockSeg { t0: number; b0: number; bps: number }
@@ -95,9 +99,43 @@ interface GrainOpts {
   throw?: boolean;
 }
 
+/** A resolved grain: sources, chance, FX expansion and spatial gain are chosen once. */
+interface LoopGrain {
+  plate: Plate;
+  key: number;
+  time: number;
+  buffer: AudioBuffer;
+  snd: number;
+  rate: number;
+  srcDur: number;
+  dur: number;
+  offset: number;
+  sourceOffset: number;
+  amp: number;
+  fadeIn: number;
+  fadeOut: number;
+  choke: boolean;
+  reverse: boolean;
+  throw: boolean;
+  sensor: boolean;
+  dist: number | null;
+  head: number;
+  x: number;
+  y: number;
+  z: number;
+  panModel: PanningModelType;
+}
+
+interface LoopPose { time: number; pose: Pose; tones: number[] }
+/** One musical window, shared by the mix and all stems before any await. */
+export interface LoopPlan { seconds: number; grains: LoopGrain[]; poses: LoopPose[] }
+
+export interface MixSnapshot { master: number; space: number; fxWet: number; levels: number[] }
+
 export interface RenderOpts {
   seconds?: number;
   beats?: number | null;
+  bpm?: number;
   tail?: number;
   onlyPlate?: Plate | null;
   seed?: number;
@@ -109,6 +147,9 @@ export interface RenderOpts {
   listenerPose?: Pose | null;
   clock?: ClockSeg[] | null;
   onProgress?: ((f: number) => void) | null;
+  loop?: boolean;
+  loopPlan?: LoopPlan | null;
+  mix?: MixSnapshot | null;
 }
 
 /** renderOffline's result: the rendered audio plus a few facts about it. */
@@ -149,6 +190,7 @@ export const engine = {
   motions: null as Map<Plate, MotionSeg[]> | null,        // per-plate motion override (offline render)
   onlyPlate: null as Plate | null,        // render a single plate (stems)
   trace: null as Voice[] | null,            // optional array of scheduled grains (tests)
+  grainCapture: null as LoopGrain[] | null,
   onEvolve: null as ((p: Plate) => void) | null,
   onSwitch: null as ((sw: Switch) => void) | null,
 
@@ -197,7 +239,7 @@ export const engine = {
     g.comp.knee.value = 12;
     g.comp.ratio.value = 3.5;
     g.comp.attack.value = 0.004;
-    g.comp.release.value = 0.22;
+    g.comp.release.value = COMP_RELEASE;
     g.makeup = ctx.createGain();
     g.makeup.gain.value = 1.5; // make-up gain after the glue compressor
     // brick-wall limiter, then a soft clipper so the output can never exceed ±1
@@ -222,7 +264,7 @@ export const engine = {
 
     // "space": generated convolution reverb
     g.reverb = ctx.createConvolver();
-    g.reverb.buffer = this.makeImpulse(ctx, 3.4);
+    g.reverb.buffer = this.makeImpulse(ctx, REVERB_SECONDS);
     g.revIn = ctx.createGain();
     g.revOut = ctx.createGain();
     g.revOut.gain.value = this.spaceLevel;
@@ -237,7 +279,7 @@ export const engine = {
     g.delayTone.type = 'lowpass';
     g.delayTone.frequency.value = 3800;
     g.delayFb = ctx.createGain();
-    g.delayFb.gain.value = 0.45;
+    g.delayFb.gain.value = DELAY_FEEDBACK;
     g.throwIn.connect(g.delay).connect(g.delayTone).connect(g.delayFb).connect(g.delay);
     g.delayTone.connect(g.master);
     const toRev = ctx.createGain();
@@ -320,7 +362,7 @@ export const engine = {
 
   stop(): void {
     if (!this.playing) return;
-    const B = this.beatAt(this.ctx!.currentTime);
+    const B = this.beatAt(this.visualTime());
     stack.plates.forEach((p) => p.stopMotion(B));
     this.playing = false;
     if (flight && flight.on) flight.clockChanged();
@@ -342,7 +384,8 @@ export const engine = {
     // A worker-driven clock keeps scheduling alive in background tabs.
     try {
       const src = `let id=null;onmessage=e=>{if(e.data==='start'){clearInterval(id);id=setInterval(()=>postMessage(0),${TICK_MS});}else{clearInterval(id);}}`;
-      const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      tickWorkerUrl ??= URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      const w = new Worker(tickWorkerUrl);
       w.onmessage = () => this.tick();
       w.onerror = () => {   // blob workers can fail asynchronously (e.g. on file://)
         w.terminate();
@@ -410,6 +453,21 @@ export const engine = {
   setSpace(v: number): void { this.spaceLevel = v; if (this.ctx) this.revOut.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05); },
   setFxWet(v: number): void { this.fxWet = v; if (this.ctx) this.throwIn.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05); },
 
+  /** Apply due flashes and counters; events are grouped by plate, not time. */
+  consumeEvents(tv: number): void {
+    if (!this.events.length) return;
+    const pending: EngineEvent[] = [];
+    for (const ev of this.events) {
+      if (ev.t <= tv) {
+        if (ev.t > ev.chip.lastFire) ev.chip.lastFire = ev.t;
+        if (ev.t > ev.plate.lastFire) ev.plate.lastFire = ev.t;
+        if (ev.sensor && !(ev.plate.lastSensor > ev.t)) ev.plate.lastSensor = ev.t;
+        ev.plate.fireCount++;
+      } else pending.push(ev);
+    }
+    this.events = pending;
+  },
+
   // ------------------------------------------------------------ scheduler
   tick(): void {
     if (!this.playing) return;
@@ -430,7 +488,7 @@ export const engine = {
       }
     }
     // the tempo history is kept whole since PLAY: exports replay it (start() resets it)
-    if (this.events.length > 4000) this.events.splice(0, this.events.length - 4000);
+    if (this.events.length > 4000) this.consumeEvents(this.visualTime());
   },
 
   /** Schedule [ta, tb), applying any queued switch exactly at its beat. */
@@ -559,46 +617,56 @@ export const engine = {
 
   playGrain(p: Plate, c: Chip, when: number, headAngle: number, opt: GrainOpts = {}): boolean {
     if (!this.offline && this.voices >= this.maxVoices) { this.stats.dropped++; return false; }
-    let chokeList: Voice[] | null = null;
-    if (p.choke) {
-      // a choked plate is monophonic: a second grain at the same instant is dropped
-      chokeList = (this.chokeVoices.get(p) || []).filter((v) => v.end > when - 0.5);
-      if (chokeList.some((v) => Math.abs(v.start - when) < 1e-6)) return false;
-    }
     const pool = sounds.poolFor(p);
     if (!pool.length) return false;
     const snd = pool[c.srcPick % pool.length];
-    const len = snd.buffer.duration;
-    const frag = p.fragmentFor(c, snd);
-    const rate = frag.rate * (opt.semis ? Math.pow(2, opt.semis / 12) : 1);
-    let dur = frag.dur;
-    if (opt.maxDur) dur = Math.min(dur, opt.maxDur);
-    const srcDur = Math.max(0.002, Math.min(dur * rate, len));
-    const offset = Math.min(frag.offset, Math.max(0, len - srcDur));
-    const buf = opt.reverse ? sounds.reversed(snd) : snd.buffer;
-    const off = opt.reverse ? Math.max(0, len - offset - srcDur) : offset;
-    const playDur = srcDur / rate;
-    const amp = p.gainFor(c) * 1.1 * (opt.gainMul != null ? opt.gainMul : 1);
+    // Reuse the fragment object; live playback does not allocate an extra event.
+    const g = p.fragmentFor(c, snd) as Fragment & LoopGrain;
+    g.rate *= opt.semis ? Math.pow(2, opt.semis / 12) : 1;
+    if (opt.maxDur) g.dur = Math.min(g.dur, opt.maxDur);
+    g.srcDur = Math.max(0.002, Math.min(g.dur * g.rate, snd.buffer.duration));
+    g.offset = Math.min(g.offset, Math.max(0, snd.buffer.duration - g.srcDur));
+    g.buffer = opt.reverse ? sounds.reversed(snd) : snd.buffer;
+    g.sourceOffset = opt.reverse ? Math.max(0, snd.buffer.duration - g.offset - g.srcDur) : g.offset;
+    g.dur = g.srcDur / g.rate;
+    g.amp = p.gainFor(c) * 1.1 * (opt.gainMul ?? 1);
+    g.plate = p; g.key = c.key; g.time = when; g.snd = snd.id;
+    g.fadeIn = p.fadeIn; g.fadeOut = p.fadeOut; g.choke = p.choke;
+    g.reverse = !!opt.reverse; g.throw = !!opt.throw;
+    g.sensor = !!opt.extra?.sensor; g.dist = opt.extra?.dist ?? null; g.head = headAngle;
+    g.x = view.plateX(p); g.y = c.radius * Math.sin(headAngle); g.z = -c.radius * Math.cos(headAngle);
+    g.panModel = this.panModel;
+    if (this.grainCapture) { this.grainCapture.push(g); return true; }
+    return this.scheduleGrain(g, when);
+  },
 
+  /** The same voice graph and choke bookkeeping for live, performance and loop playback. */
+  scheduleGrain(g: LoopGrain, when: number): boolean {
+    const p = g.plate;
+    let chokeList: Voice[] | null = null;
+    if (g.choke) {
+      chokeList = (this.chokeVoices.get(p) || []).filter((v) => v.end > when - 0.5);
+      if (chokeList.some((v) => Math.abs(v.start - when) < 1e-6)) return false;
+    }
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.playbackRate.value = rate;
+    src.buffer = g.buffer;
+    src.playbackRate.value = g.rate;
     const env = ctx.createGain();
     env.gain.value = 0;
     const choke = ctx.createGain();
-    const pan = this.makePanner(p, c, headAngle);
+    const pan = this.makePanner(g.x, g.y, g.z, g.panModel);
     src.connect(env);
     env.connect(choke);
     choke.connect(pan);
     pan.connect(this.buses[p.index].input);
-    if (opt.throw) pan.connect(this.throwIn);
-    env.gain.setValueCurveAtTime(this.grainCurve(playDur, amp, p.fadeIn, p.fadeOut), when, playDur);
-    src.start(when, off, srcDur);
-    src.stop(when + playDur + 0.02);
+    if (g.throw) pan.connect(this.throwIn);
+    env.gain.setValueCurveAtTime(this.grainCurve(g.dur, g.amp, g.fadeIn, g.fadeOut), when, g.dur);
+    src.start(when, g.sourceOffset, g.srcDur);
+    src.stop(when + g.dur + 0.02);
 
-    const voice: Voice = { start: when, end: when + playDur, choke, choked: false, plate: p.index, offset, snd: snd.id, key: c.key, reverse: !!opt.reverse, gain: amp,
-      sensor: !!(opt.extra && opt.extra.sensor), dist: opt.extra ? opt.extra.dist : null, head: headAngle };
+    const voice: Voice = { start: when, end: when + g.dur, choke, choked: false, plate: p.index, offset: g.offset, snd: g.snd, key: g.key, reverse: g.reverse, gain: g.amp,
+      sensor: g.sensor, dist: g.dist, head: g.head };
     if (chokeList) {
       // grains can be scheduled out of order (ratchets run ahead): cut every voice
       // sounding at `when`, and cut this one where an already-scheduled voice starts
@@ -610,7 +678,7 @@ export const engine = {
         }
       }
       let tc = Infinity;
-      for (const v of chokeList) if (v.start > when && v.start < when + playDur) tc = Math.min(tc, v.start);
+      for (const v of chokeList) if (v.start > when && v.start < when + g.dur) tc = Math.min(tc, v.start);
       if (tc < Infinity) { choke.gain.setTargetAtTime(0, tc, 0.0025); voice.choked = true; voice.chokedAt = tc; }
       chokeList.push(voice);
       this.chokeVoices.set(p, chokeList);
@@ -632,16 +700,13 @@ export const engine = {
   },
 
   /** The grain sounds from where the chip sits as it crosses the head. */
-  makePanner(p: Plate, c: Chip, headAngle: number): PannerNode {
+  makePanner(x: number, y: number, z: number, model: PanningModelType): PannerNode {
     const pan = this.ctx!.createPanner();
-    pan.panningModel = this.panModel;
+    pan.panningModel = model;
     pan.distanceModel = 'inverse';
     pan.refDistance = 3;
     pan.rolloffFactor = 1.15;
     pan.maxDistance = 60;
-    const x = view.plateX(p);
-    const y = c.radius * Math.sin(headAngle);
-    const z = -c.radius * Math.cos(headAngle);
     if (pan.positionX) {
       pan.positionX.value = x; pan.positionY.value = y; pan.positionZ.value = z;
     } else {
@@ -721,26 +786,88 @@ export const engine = {
   },
 
   // ------------------------------------------------------------ offline render
-  /** Render the stack from song beat `startBeat` for `seconds` (+tail) into an
-   *  AudioBuffer, with the same scheduler on an OfflineAudioContext.
-   *  - motions: plate motion to use (default: aligned from bar 1)
-   *  - flight:  a frozen flight context (flight.exportCtx) to replay the ship
-   *  - listenerPose: static listener when not flying (default: home view)
-   *  Chance uses the live roll seed, so the same beats roll the same way. */
-  async renderOffline(this: { rollSeed: number; bpm: number; buildGraph(ctx: BaseAudioContext): Graph }, { seconds, beats = null, tail = 4, onlyPlate = null, seed = this.rollSeed, sampleRate = 48000, trace = false,
-    startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null, onProgress = null }: RenderOpts): Promise<RenderedBuffer> {
-    // tempo map: the played one (export while playing), else the current tempo
-    const offClock = clock || [{ t0: 0, b0: startBeat, bps: this.bpm / 60 }];
-    if (beats != null) {
+  /** Resolve one window before any await. Repetitions keep its chance, source,
+   *  FX, grain and flight decisions rather than reading live state again. */
+  captureLoop(this: { bpm: number; rollSeed: number }, { seconds, beats = null, bpm = this.bpm, seed = this.rollSeed,
+    startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null }: RenderOpts): LoopPlan {
+    const off: Engine = Object.create(engine);
+    off.offline = true;
+    off.bpm = bpm;
+    off.clock = clock || [{ t0: 0, b0: startBeat, bps: bpm / 60 }];
+    off.motions = motions || new Map(stack.plates.map((p): [Plate, MotionSeg[]] =>
+      [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
+    off.flightRender = flight;
+    off.sensorCursor = null;
+    off.onlyPlate = null;
+    off.rollSeed = seed >>> 0;
+    off.stats = { triggers: 0, dropped: 0, scheduled: 0 };
+    const grains: LoopGrain[] = off.grainCapture = [];
+    const endBeat = beats == null ? off.beatAt(seconds!) : startBeat + beats;
+    seconds = off.timeAtBeat(endBeat);
+    const chunk = 0.1 * bpm / 60;
+    for (let k = 0; startBeat + k * chunk < endBeat; k++) {
+      off.scheduleBeats(startBeat + k * chunk, Math.min(endBeat, startBeat + (k + 1) * chunk));
+    }
+    // FX sub-grains crossing the endpoint wrap into the next repetition.
+    for (const g of grains) g.time = ((g.time % seconds) + seconds) % seconds;
+    grains.sort((a, b) => a.time - b.time);
+    const poses: LoopPose[] = [];
+    const addPose = (time: number) => {
+      const p = flight ? flight.poseAt(time) : listenerPose || view.homePose();
+      const pose = { pos: p.pos.slice(), fwd: p.fwd.slice(), up: p.up.slice() };
+      poses.push({ time, pose, tones: stack.plates.map((plate) => off.distanceTone(plate, pose)) });
+    };
+    addPose(0);
+    if (flight?.moving) {
+      for (let t = 0.05; t < seconds; t += 0.05) addPose(t);
+      const last = Math.max(0, seconds - 1 / 192000);
+      if (last > poses[poses.length - 1].time) addPose(last);
+    }
+    return { seconds, grains, poses };
+  },
+
+  /** AS PLAYED runs once with a tail. LOOP repeats the captured events through
+   *  one continuous graph, then extracts a warmed, sample-exact period. */
+  async renderOffline(this: { bpm: number; rollSeed: number; masterLevel: number; fxWet: number; spaceLevel: number;
+    buildGraph(ctx: BaseAudioContext): Graph; captureLoop(opts: RenderOpts): LoopPlan },
+    { seconds, beats = null, bpm = this.bpm, tail = 4, onlyPlate = null,
+    seed = this.rollSeed, sampleRate = 48000, trace = false, startBeat = 0,
+    motions = null, flight = null, listenerPose = null, clock = null, onProgress = null,
+    loop = false, loopPlan = null, mix = null }: RenderOpts): Promise<RenderedBuffer> {
+    const mx = mix ?? { master: this.masterLevel, space: this.spaceLevel, fxWet: this.fxWet, levels: stack.plates.map((p) => p.level) };
+    const offClock = clock || [{ t0: 0, b0: startBeat, bps: bpm / 60 }];
+    const lp = loop ? loopPlan || this.captureLoop({ seconds, beats, bpm, seed, startBeat, motions, flight, listenerPose, clock: offClock }) : null;
+    if (lp) seconds = lp.seconds;
+    else if (beats != null) {
       const tmp: Engine = Object.create(engine); tmp.clock = offClock;
       seconds = tmp.timeAtBeat(startBeat + beats);
     }
-    const octx = new OfflineAudioContext(2, Math.ceil((seconds! + tail) * sampleRate), sampleRate);
+    const frames = Math.round(seconds! * sampleRate), period = frames / sampleRate;
+    const grains = lp ? (onlyPlate ? lp.grains.filter((g) => g.plate === onlyPlate) : lp.grains) : [];
+    let warmSeconds = 0;
+    if (lp) {
+      let longest = 0;
+      for (const g of grains) longest = Math.max(longest, g.dur);
+      // Bound residual state below -140 dB without allocating whole extra
+      // periods for long exports (128 bars at 30 BPM is already 1024 seconds).
+      const throws = mx.fxWet > 0 && grains.some((g) => g.throw);
+      const echoes = throws ? Math.ceil(Math.log(1e-7) / Math.log(DELAY_FEEDBACK)) * 0.75 * 60 / bpm : 0;
+      warmSeconds = longest + echoes + (mx.space > 0 ? REVERB_SECONDS : 0) + COMP_RELEASE * Math.log(1e7);
+    }
+    const warmFrames = Math.ceil(warmSeconds * sampleRate), warm = warmFrames / sampleRate;
+    // Choke and compressor lookahead must see the restarted grains after the crop.
+    const totalFrames = lp ? warmFrames + frames + Math.ceil(0.1 * sampleRate) : Math.ceil((seconds! + tail) * sampleRate);
+    const total = totalFrames / sampleRate;
+    const octx = new OfflineAudioContext(2, totalFrames, sampleRate);
     const off: Engine = Object.create(engine);
+    off.bpm = bpm;
     off.ctx = octx;
     off.offline = true;
     off.playing = true;
-    Object.assign(off, this.buildGraph(octx));
+    off.masterLevel = mx.master;
+    off.spaceLevel = mx.space;
+    off.fxWet = mx.fxWet;
+    Object.assign(off, this.buildGraph.call(off, octx));
     off.clock = offClock;
     off.motions = motions || new Map(stack.plates.map((p): [Plate, MotionSeg[]] => [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
     off.flightRender = flight;
@@ -754,61 +881,85 @@ export const engine = {
     off.rollSeed = seed >>> 0;
     off.onlyPlate = onlyPlate;
     off.trace = trace ? [] : null;
-    stack.plates.forEach((p, i) => { off.buses[i].level.gain.value = p.level; });
-    if (flight) {
-      // the listener rides the ship; plate tone follows its distance
+    stack.plates.forEach((_, i) => { off.buses[i].level.gain.value = mx.levels[i]; });
+    const setPose = (pose: Pose, t: number, ramp: boolean, tones?: number[]) => {
       const L = octx.listener;
-      const step = 0.05, total = seconds! + tail;
-      for (let t = 0; t <= total + 1e-9; t += step) {
-        const pose = flight.poseAt(t);
-        if (L.positionX) {
-          const set = (param: AudioParam, v: number) => (t === 0 ? param.setValueAtTime(v, 0) : param.linearRampToValueAtTime(v, t));
-          set(L.positionX, pose.pos[0]); set(L.positionY, pose.pos[1]); set(L.positionZ, pose.pos[2]);
-          set(L.forwardX, pose.fwd[0]); set(L.forwardY, pose.fwd[1]); set(L.forwardZ, pose.fwd[2]);
-          set(L.upX, pose.up[0]); set(L.upY, pose.up[1]); set(L.upZ, pose.up[2]);
-        } else if (t === 0) {
-          L.setPosition(...(pose.pos as [number, number, number])); L.setOrientation(...(pose.fwd as [number, number, number]), ...(pose.up as [number, number, number]));
+      if (L.positionX) {
+        const set = (param: AudioParam, v: number) => ramp ? param.linearRampToValueAtTime(v, t) : param.setValueAtTime(v, t);
+        set(L.positionX, pose.pos[0]); set(L.positionY, pose.pos[1]); set(L.positionZ, pose.pos[2]);
+        set(L.forwardX, pose.fwd[0]); set(L.forwardY, pose.fwd[1]); set(L.forwardZ, pose.fwd[2]);
+        set(L.upX, pose.up[0]); set(L.upY, pose.up[1]); set(L.upZ, pose.up[2]);
+      } else if (t === 0) off.setListener(octx, pose, false);
+      stack.plates.forEach((p, i) => {
+        const f = tones ? tones[i] : off.distanceTone(p, pose), param = off.buses[i].tone.frequency;
+        if (ramp) param.linearRampToValueAtTime(f, t); else param.setValueAtTime(f, t);
+      });
+    };
+    if (lp) {
+      setPose(lp.poses[0].pose, 0, false, lp.poses[0].tones);
+      if (lp.poses.length > 1) {
+        for (let c = Math.floor(-warm / period); warm + c * period < total; c++) {
+          for (let i = 0; i < lp.poses.length; i++) {
+            const f = lp.poses[i], at = warm + c * period + f.time / lp.seconds * period;
+            if (at >= 0 && at < total) setPose(f.pose, at, i !== 0, f.tones);
+          }
         }
-        stack.plates.forEach((p, i) => {
-          const f = off.distanceTone(p, pose);
-          const param = off.buses[i].tone.frequency;
-          if (t === 0) param.setValueAtTime(f, 0); else param.linearRampToValueAtTime(f, t);
-        });
-        if (!flight.moving) break; // parked: one pose is the whole render
       }
-    } else {
-      const pose = listenerPose || view.homePose();
-      off.setListener(octx, pose, false);
-      stack.plates.forEach((p, i) => { off.buses[i].tone.frequency.value = off.distanceTone(p, pose); });
-    }
-    // schedule in ~0.1 s windows like the live scheduler (keeps a moving ship's ψ
-    // linear), a little ahead of the render via suspend/resume, so node count stays
-    // bounded and progress can be reported
-    const B1 = off.beatAt(seconds!), chunk = 0.1 * (this.bpm / 60);
-    let k = 0;
-    const scheduleUntil = (Bt: number) => {
-      const lim = Math.min(Bt, B1);
-      for (;;) {
-        const Ba = startBeat + k * chunk;
-        if (Ba >= lim) break;
-        off.scheduleBeats(Ba, Math.min(B1, startBeat + (k + 1) * chunk));
-        k++;
+    } else if (flight) {
+      for (let t = 0; t <= total + 1e-9; t += 0.05) {
+        setPose(flight.poseAt(t), t, t > 0);
+        if (!flight.moving) break;
+      }
+    } else setPose(listenerPose || view.homePose(), 0, false);
+
+    const B1 = off.beatAt(seconds!), chunk = 0.1 * bpm / 60;
+    let k = 0, cycle = Math.floor(-warm / period), index = 0, loopTriggers = 0;
+    const scheduleUntil = (time: number) => {
+      if (lp) {
+        if (!grains.length) return;
+        for (;;) {
+          const g = grains[index], at = warm + cycle * period + g.time / lp.seconds * period;
+          if (at >= time) break;
+          if (at >= 0 && off.scheduleGrain(g, at) && at >= warm && at < warm + period) loopTriggers++;
+          if (++index === grains.length) { index = 0; cycle++; }
+        }
+      } else {
+        const lim = Math.min(off.beatAt(time), B1);
+        for (;;) {
+          const Ba = startBeat + k * chunk;
+          if (Ba >= lim) break;
+          off.scheduleBeats(Ba, Math.min(B1, startBeat + (k + 1) * chunk));
+          k++;
+        }
       }
     };
-    const AHEAD = 1.5, STEP = 1;
-    const quantum = 128 / sampleRate;
-    scheduleUntil(off.beatAt(AHEAD));
-    for (let s = STEP; s < seconds!; s += STEP) {
+    const AHEAD = 1.5, STEP = 1, quantum = 128 / sampleRate;
+    scheduleUntil(Math.min(AHEAD, total));
+    const schedulingEnd = lp ? total : seconds!;
+    for (let s = STEP; s < schedulingEnd; s += STEP) {
       const at = Math.ceil(s / quantum) * quantum;
+      if (at >= total) break;
       octx.suspend(at).then(() => {
-        scheduleUntil(off.beatAt(at + AHEAD));
-        if (onProgress) onProgress(at / (seconds! + tail));
+        scheduleUntil(Math.min(at + AHEAD, total));
+        if (onProgress) onProgress(at / total);
         octx.resume();
       });
     }
-    const buf = (await octx.startRendering()) as RenderedBuffer;
+    const rendered = await octx.startRendering();
+    let buf: RenderedBuffer = rendered;
+    if (lp) {
+      buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate });
+      for (let c = 0; c < 2; c++) buf.copyToChannel(rendered.getChannelData(c).subarray(warmFrames, warmFrames + frames), c);
+      if (off.trace) {
+        off.trace = off.trace.filter((v) => v.start >= warm && v.start < warm + period);
+        for (const v of off.trace) {
+          v.start -= warm; v.end -= warm;
+          if (v.chokedAt !== undefined) v.chokedAt -= warm;
+        }
+      }
+    }
     if (onProgress) onProgress(1);
-    buf.triggers = off.stats.triggers;
+    buf.triggers = lp ? loopTriggers : off.stats.triggers;
     buf.trace = off.trace;
     buf.loopSeconds = seconds;
     return buf;

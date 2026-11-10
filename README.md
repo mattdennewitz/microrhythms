@@ -93,7 +93,10 @@ fields. The ship is a **moving read head**:
 - Landing remembers where you were: take off again and the flight resumes from the same
   position, heading and mode (and autopilot phase). **↺ RESTART PATH** starts over at the
   first plate.
-- Exports render what the ship hears from bar 1, exactly as PLAY plays it (see Output).
+- LOOP captures what the ship hears at its **current position and heading** when you
+  click export, in manual or autopilot mode, playing or stopped. AS PLAYED instead
+  renders the performance from PLAY bar 1 with its recorded flight and tempo history
+  (see Output).
 
 ## Fragments
 
@@ -107,16 +110,46 @@ fields. The ship is a **moving read head**:
 
 ## Output
 
-**EXPORT WAV** renders **what PLAY plays**: the song from bar 1 (1, 2 or 4 phrases).
-Every PLAY starts the song at bar 1, so when stopped the export is exactly what your
-next PLAY will produce; while playing it's this PLAY from bar 1. Chance rolls are
-deterministic per beat, so the export has the same hits you hear. In flight it renders
-the ship's sensor hits, the proximity mix and the listener at the ship: parked or flying
-by hand, from where you are; on autopilot, with the paused path carrying on exactly as
-it does after PLAY. **AS PLAYED** (default) keeps the reverb/delay tail at the end;
-**LOOP** folds it onto the start for seamless looping (so bar 1 then carries the tail).
-**STEMS .ZIP** renders one WAV per audible plate from the same plan. The files are
-24-bit / 48 kHz.
+**EXPORT WAV** renders 1, 2 or 4 phrases in the selected mode. **LOOP** creates a
+fresh window from your **current position and plate pattern at the export click**,
+not the beginning of an earlier performance. It captures each plate's current phase
+and active speed, the current ship/listener position and orientation, flight
+parameters, and current project BPM. In flight, the ship stays at that captured
+pose for the loop: manual or autopilot, playing or stopped. Fly somewhere else and
+the next export captures that new place; it does not replay or continue a flight path.
+
+LOOP's length is exactly the selected bar count at the captured BPM, rounded to the
+nearest audio frame, regardless of earlier playback tempos. The window's chance
+rolls and grain/source/FX choices are captured once and repeated through one
+continuous, warmed audio graph. Grains, CHOKE, reverb, delay and dynamics therefore
+carry across the loop boundary; the export is not a one-shot with its processed
+tail added onto the beginning. LOOP repeats this local window even when plate
+cycles do not divide its bar count. Fractional BPM is preserved in LOOP filenames;
+`from1` means local output bar 1, not PLAY's original bar 1.
+
+**AS PLAYED** (default) renders the performance from **PLAY's bar 1**, preserving
+recorded tempo changes and plate/flight motion history while playing. When stopped
+it follows the next PLAY at the current project BPM. It appends four seconds of
+reverb/delay tail and is not an exact-length loop. Chance rolls are deterministic
+per beat. In flight, both modes include sensor hits and proximity mix, but only
+AS PLAYED follows the performance's flight path.
+
+Stopping playback freezes the displayed plate positions without a latency jump,
+stops manual-flight inertia and clears held flight keys. Manual lookahead accounts
+for thrust and damping. Flight replay retains the beginning needed by the maximum
+AS PLAYED export (512 beats plus up to 16 beats of tail), rather than discarding it
+during long sessions.
+
+**STEMS .ZIP** renders one WAV per audible plate. BPM, bar count, mode, master,
+space, throw wet and plate levels are captured once for the mix or all its stems;
+changes apply to the next export. LOOP also captures its events, plate motion,
+ship/listener pose and flight parameters. AS PLAYED does not freeze sound buffers
+or pattern edits made mid-export. Each stem keeps its own master dynamics, like
+soloing that plate, so summed stems need not null against the mix.
+
+Mixes and stems are 24-bit / 48 kHz; tempo is stored in projects and filenames,
+not a WAV tempo field. Progress distinguishes rendering from encoding. Stem ZIP
+member names use UTF-8, and completed exports are not retained by the exporter.
 
 ## Projects
 
@@ -173,7 +206,9 @@ denied, copy the address-bar URL after it updates.
 ## Your own sounds
 
 - **＋ ADD SOUNDS** or drop audio files anywhere (wav/mp3/ogg/flac/m4a/aif).
-  Files are mono-ised, silence-trimmed, normalised and capped at 90 s.
+  Files are mono-ised, silence-trimmed, normalised and capped at 90 s. If stereo
+  channels substantially cancel, the loudest channel is used instead. Longer
+  imports keep the first 90 s and the import notice says **first 90 s used**.
 - **● REC MIC** records up to 20 s from the microphone.
 - **⟲ RESAMPLE 4s** captures the machine's own output as a new source.
 - **CLEAR ALL** removes all imported/recorded/resampled sounds and turns every
@@ -243,7 +278,7 @@ src/core/stack.ts         plates, chips, styles, breaks, FX, cut modes, snapshot
 src/core/sounds.ts        synthesized built-ins, sample library, decoding, onsets
 src/core/engine.ts        beat clock, scheduler + queued switches, grains/FX, spatial graph, offline render
 src/core/history.ts       undo / redo snapshots
-src/core/exporter.ts      WAV encoder, ZIP writer, loop folding, export actions
+src/core/exporter.ts      WAV encoder, ZIP writer, captured export plans and actions
 src/core/project.ts       versioned save / open the whole machine as JSON
 src/core/project-format.ts strict Zod schemas for project files and share links
 src/core/project-limits.ts shared sound budgets and Zod label schema
@@ -288,6 +323,11 @@ npm ci
 npm run dev        # dev server (Vite + the Cloudflare Workers runtime)
 npm run typecheck  # tsc, including Vite and Cloudflare configuration
 npm test           # dependency-free core regression tests using Node's TS support
+npx playwright install chromium # once; Linux CI uses --with-deps chromium
+npm run test:audio          # fast real-audio PR regressions
+npm run test:audio:extended # additional combinations (weekly/manual)
+npm run test:audio:large    # long renders and maximum-size downloads (opt-in)
+npm run test:audio:full     # every browser audio case (release/broad audio changes)
 npm run build      # typecheck + production build into .cloudflare/output/v0
 npm run preview    # serve the last production build locally (build first)
 ```
@@ -295,12 +335,43 @@ npm run preview    # serve the last production build locally (build first)
 The core tests cover deterministic helpers and plates, JSON snapshots,
 stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
 validation, bounded share-link roundtrips and canvas picking after viewport pan/scale.
-They do not exercise React DOM, browser audio playback or offline audio rendering;
-check those in a browser.
+The Node suite does not exercise React DOM or Web Audio. Browser audio tests use
+the real development app and OfflineAudioContext in Chromium, sequentially in
+isolated contexts without retries. No audio mocks replace rendering or downloads.
 
-GitHub Actions runs the `Tests` check on every push and pull request to `main`,
-using Node.js 24, `npm ci`, `npm test`, and the typechecked production build.
-Merging to `main` requires a pull request with this check passing against the
+`test:audio` is the default PR gate: short tempo-boundary mix/stem exports, PCM
+onset timing, tempo history, snapshots and delay, project/share restoration,
+rounding/tails, mute/solo/silence, cyclic CHOKE/FX boundaries, representative
+manual/autopilot current-position captures, preserved AS PLAYED history, and UI
+downloads. Snapshot regressions use a short subsequent export by default; their
+original 128-bar cases remain available in the large tier.
+
+`@extended` covers the remaining short length/tempo and flight-state combinations
+plus the supplied seven-stem UI fixture. `@large` covers matrix renders of at least
+128 musical seconds and the maximum-size download. The tiers are disjoint; `full`
+runs their union. Extended and large cases are filtered out, not skipped, in the
+default command. Measurements and UI screenshots are written under `test-results/`.
+
+Run affected checks during development rather than the full matrix after each edit:
+
+```sh
+npm test
+npm run test:audio -- tests/browser/audit.spec.mjs
+npm run test:audio -- tests/browser/loop-boundary.spec.mjs
+npm run test:audio:extended -- tests/browser/current-position-loop.spec.mjs
+```
+
+Use `test:audio:large` when changing encoding, export memory, long-duration rendering
+or download handling. Use `test:audio:full` for broad audio changes or release
+validation; it is intentionally not the ordinary PR feedback loop.
+
+GitHub Actions runs independent `Tests` and `Audio` jobs on every push and pull
+request to `main`, using Node.js 24 and `npm ci`. `Tests` runs `npm test` and the
+typechecked production build; `Audio` installs Chromium and runs the fast
+`npm run test:audio` gate. The extended tier runs weekly on Monday at 06:00 UTC.
+Manual CI dispatch selects `extended`, `large`, or `full`; large renders never run
+automatically.
+Merging to `main` requires a pull request with the `Tests` check passing against the
 latest `main`; the requirement also applies to administrators. Branch protection
 is configured in GitHub repository settings, not in the workflow file.
 

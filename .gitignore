@@ -3,3 +3,5 @@ node_modules/
 .cloudflare/
 .DS_Store
 .claude/worktrees/
+test-results/
+playwright-report/

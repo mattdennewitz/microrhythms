@@ -321,11 +321,11 @@ function Output() {
       <Seg id="len-row" value={exporter.phrases} onPick={(v) => app.setExportPhrases(v)}
         items={[1, 2, 4].map((n) => ({ label: `${n} PHRASE${n > 1 ? 'S' : ''}`, value: n }))} />
       <Seg id="loop-row" value={exporter.mode} onPick={(v) => app.setExportMode(v)} items={[
-        { label: 'AS PLAYED', value: 'tail', title: 'exactly what PLAY plays, plus 4 s of reverb/delay tail' },
-        { label: 'LOOP', value: 'loop', title: 'exact length with the tail folded onto the start (for looping; bar 1 then carries the tail)' },
+        { label: 'AS PLAYED', value: 'tail', title: 'Performance from PLAY bar 1, with recorded tempo and motion history, plus 4 s of reverb/delay tail' },
+        { label: 'LOOP', value: 'loop', title: 'Capture the current position and pattern at click: exact length at the current project BPM, with continuous grains, choke and effects across the loop boundary' },
       ] as Array<{ label: string; value: typeof exporter.mode; title: string }>} />
       <div className="row">
-        <button id="btn-export-wav" title="Render the mix from bar 1 (offline, seeded)" disabled={app.exportBusy} onClick={() => app.runExport('wav')}>⤓ EXPORT WAV</button>
+        <button id="btn-export-wav" title={exporter.mode === 'loop' ? 'Render a fresh loop from the current position and pattern captured at click (offline, seeded)' : 'Render the performance from PLAY bar 1, plus 4 s of tail (offline, seeded)'} disabled={app.exportBusy} onClick={() => app.runExport('wav')}>⤓ EXPORT WAV</button>
         <button id="btn-export-stems" title="One WAV per audible plate, zipped" disabled={app.exportBusy} onClick={() => app.runExport('stems')}>⤓ STEMS .ZIP</button>
       </div>
       <p className="hint" id="export-status" role="status">{app.exportStatus ?? app.exportSummary()}</p>
@@ -337,7 +337,7 @@ function Output() {
       </div>
       <input type="file" id="project-input" hidden accept=".json,application/json" ref={projectInput}
         onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) app.openProject(f); }} />
-      <p className="hint" id="export-flight-note" hidden={!flight.on}>in flight, exports render what the ship hears from bar 1: sensor hits, proximity and your position — on autopilot, the path carries on exactly as it will after PLAY</p>
+      <p className="hint" id="export-flight-note" hidden={!flight.on}>LOOP captures your current ship position, heading and plate pattern at click — manual or autopilot, playing or stopped. AS PLAYED renders the performance from PLAY bar 1, including its flight history.</p>
     </section>
   );
 }

@@ -256,6 +256,17 @@ function condition(buffer: AudioBuffer): AudioBuffer {
     const d = buffer.getChannelData(c);
     for (let i = 0; i < len; i++) mono[i] += d[i] / ch;
   }
+  if (ch > 1) {
+    let mixPeak = 0, channelPeak = 0, loudest = 0;
+    for (let i = 0; i < len; i++) mixPeak = Math.max(mixPeak, Math.abs(mono[i]));
+    for (let c = 0; c < ch; c++) {
+      const data = buffer.getChannelData(c);
+      let peak = 0;
+      for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(data[i]));
+      if (peak > channelPeak) { channelPeak = peak; loudest = c; }
+    }
+    if (mixPeak < 0.25 * channelPeak) mono.set(buffer.getChannelData(loudest).subarray(0, len));
+  }
   // remove DC so trimming and normalising act on the signal, not an offset
   let mean = 0;
   for (let i = 0; i < len; i++) mean += mono[i];
@@ -336,6 +347,7 @@ export const sounds = {
     // Reject over-budget additions before mono/trim, peaks or onset allocations.
     userCapacity(this.list, Math.min(buffer.length, Math.floor(buffer.sampleRate * MAX_SOUND_SECONDS)), buffer.sampleRate);
     const snd = this.add(name, condition(buffer));
+    if (buffer.length > Math.floor(buffer.sampleRate * MAX_SOUND_SECONDS)) snd.truncated = true;
     stack.plates.forEach((p) => p.sourceIds.add(snd.id));
     this.emit();
     return snd;
