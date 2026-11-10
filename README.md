@@ -188,6 +188,13 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 - Click a plate to select it; **shift-click** a cell to add or remove a chip.
 - The level meters (bottom left) each have an **M** toggle: click to mute that plate,
   shift-click to solo it. Click the level itself to select the plate.
+- On touchscreens, drag with one finger to orbit (or look in flight); pinch with two
+  fingers to magnify the page and pinch back out to recover. Pinching cancels camera
+  dragging rather than moving the view. Rapid mute/control taps do not zoom the page.
+  The meter overlay scrolls when it cannot fit, and the panel scrolls independently.
+- Long-press actions cancel when you move off the button, start a second touch, or
+  leave the app. Flight holds release on lift, cancellation or leaving the app;
+  separate fingers can hold thrust and brake independently.
 - Hover a chip to see which fragment it holds (sound, offset, length, rate).
 - **ORBIT / SPLIT** (`S`) changes separation; **AUTO-ORBIT** (`O`) drifts the camera.
 - **EAR: CAMERA** makes the listener ride the camera, so orbiting moves the sound
@@ -212,7 +219,8 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 - Toggles expose their pressed state, sliders announce the value shown (not the raw
   position), and play/stop, queued and fired switches and export progress are announced.
 - The hidden panel leaves the tab order; dim text meets 4.5:1 contrast; targets are at
-  least 24 px; the page has headings and landmarks. Checked with axe-core (0 violations).
+  least 24 px (44 px on coarse-pointer touchscreens); the page has headings and
+  landmarks. Checked with axe-core (0 violations).
 
 ## Files
 
@@ -280,8 +288,9 @@ npm run preview    # serve the last production build locally (build first)
 
 The core tests cover deterministic helpers and plates, JSON snapshots,
 stopped-engine undo/redo, WAV/ZIP encoding, required project versions, project
-validation and bounded share-link roundtrips. They do not exercise React DOM,
-browser audio playback or offline audio rendering; check those in a browser.
+validation, bounded share-link roundtrips and canvas picking after viewport pan/scale.
+They do not exercise React DOM, browser audio playback or offline audio rendering;
+check those in a browser.
 
 GitHub Actions runs the `Tests` check on every push and pull request to `main`,
 using Node.js 24, `npm ci`, `npm test`, and the typechecked production build.

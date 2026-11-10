@@ -108,24 +108,59 @@ export function Toggle({ on, className, children, ...rest }: { on: boolean; chil
 /** Tap vs long-press (≥450 ms). Keyboard activation counts as a tap. */
 export function usePressable(onTap: (e: MouseEvent<HTMLButtonElement>) => void, onLong: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const longFired = useRef(false);
-  useEffect(() => () => clearTimeout(timer.current), []);
-  const clear = () => clearTimeout(timer.current);
+  const pointer = useRef<number | null>(null);
+  const suppressClick = useRef(false);
+  const clear = () => { clearTimeout(timer.current); timer.current = undefined; };
+  const cancel = () => {
+    if (pointer.current === null) return;
+    clear();
+    pointer.current = null;
+    suppressClick.current = true;
+  };
+  const release = (e: { pointerId: number }) => {
+    if (e.pointerId !== pointer.current) return;
+    clear();
+    pointer.current = null;
+  };
+  const cancelPointer = (e: { pointerId: number }) => { if (e.pointerId === pointer.current) cancel(); };
+  useEffect(() => {
+    // A second contact can start a browser pinch even outside this button.
+    const anotherPointer = (e: PointerEvent) => {
+      if (pointer.current !== null && e.pointerId !== pointer.current) cancel();
+    };
+    const hidden = () => { if (document.hidden) cancel(); };
+    window.addEventListener('pointerdown', anotherPointer);
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', cancelPointer);
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('pointerdown', anotherPointer);
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', cancelPointer);
+      window.removeEventListener('blur', cancel);
+      document.removeEventListener('visibilitychange', hidden);
+      clear();
+      pointer.current = null;
+    };
+  }, []);
   return {
     onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
-      if (e.button !== 0) return;
-      longFired.current = false;
+      if (!e.isPrimary || e.button !== 0 || pointer.current !== null) return;
+      pointer.current = e.pointerId;
+      suppressClick.current = false;
       clear();
-      timer.current = setTimeout(() => { longFired.current = true; onLong(); }, 450);
+      timer.current = setTimeout(() => { suppressClick.current = true; onLong(); }, 450);
     },
-    onPointerUp: clear,
-    onPointerLeave: clear,
-    onPointerCancel: () => { clear(); longFired.current = false; },
+    onPointerUp: release,
+    onPointerLeave: cancelPointer,
+    onPointerCancel: cancelPointer,
+    onLostPointerCapture: cancelPointer,
+    onBlur: cancel,
     onClick: (e: MouseEvent<HTMLButtonElement>) => {
       clear();
-      if (e.detail === 0) { longFired.current = false; onTap(e); return; } // keyboard activation
-      if (longFired.current) { longFired.current = false; return; }
-      onTap(e);
+      if (e.detail === 0) { cancel(); suppressClick.current = false; onTap(e); return; } // keyboard activation
+      if (!suppressClick.current) onTap(e);
     },
   };
 }

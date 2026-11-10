@@ -73,16 +73,21 @@ export const view = {
     this.small = document.createElement('canvas');
     this.sg = this.small.getContext('2d');
     this.canBlur = 'filter' in this.sg!;
+    this.w = this.h = 0;
     this.resize();
     const resize = () => this.resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
     window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
+    return () => { observer.disconnect(); window.removeEventListener('resize', resize); };
   },
 
   resize(): void {
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.w = Math.floor(window.innerWidth * this.dpr);
-    this.h = Math.floor(window.innerHeight * this.dpr);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const bounds = this.canvas!.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(bounds.width * dpr)), h = Math.max(1, Math.floor(bounds.height * dpr));
+    if (this.w === w && this.h === h && this.dpr === dpr) return;
+    this.dpr = dpr; this.w = w; this.h = h;
     this.canvas!.width = this.w;
     this.canvas!.height = this.h;
     this.small!.width = Math.max(1, Math.floor(this.w / 4));
@@ -195,9 +200,10 @@ export const view = {
     ]);
   },
 
-  /** Which plate (and cell) is under a screen point (css px)? */
+  /** Which plate (and cell) is under a client point (CSS px), including a panned viewport? */
   pick(cssX: number, cssY: number, tv: number, playing: boolean): PickHit | null {
-    const sx = cssX * this.dpr, sy = cssY * this.dpr;
+    const bounds = this.canvas!.getBoundingClientRect();
+    const sx = (cssX - bounds.left) * this.w / bounds.width, sy = (cssY - bounds.top) * this.h / bounds.height;
     const d = this.ray(sx, sy);
     let best: PickHit | null = null;
     for (const p of stack.plates) {
