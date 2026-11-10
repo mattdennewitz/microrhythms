@@ -11,6 +11,7 @@ import { history } from '../src/core/history.ts';
 import { registerUi, ui } from '../src/core/bridge.ts';
 import { mulberry32 } from '../src/core/util.ts';
 import { MAX_USER_SOUNDS, MAX_USER_SAMPLES, MAX_SOUND_ID } from '../src/core/project-limits.ts';
+import { installAudioBuffer, recordingBuffer, TestAudioBuffer } from './audio-buffer.mjs';
 
 // Exercise real sound import/remapping without requiring Web Audio in Node.
 function buffer(data = new Float32Array([0, 0.5, -0.25, 1]), sampleRate = 48000) {
@@ -242,6 +243,185 @@ test('kept snapshots containing removed sample ids remain compatible with existi
   project.apply(saved);
   assert.deepEqual(ui.slots[0][0].sourceIds, [1, 2]);
 });
+
+test('clearing samples removes enabled and disabled user sounds, disables stock and preserves patterns', () => {
+  const first = sounds.add('IMPORTED', buffer(), false, false);
+  const second = sounds.add('RECORDED', buffer(), false, false);
+  second.enabled = false;
+  sounds.get(1).enabled = false;
+  stack.plates.forEach((p) => { p.sourceIds.add(first.id); p.sourceIds.add(second.id); });
+  stack.plates[0].sourceIds.clear(); // An empty selection normally falls back to every enabled sound.
+  const before = stack.snapshot();
+
+  sounds.clearAll();
+  const after = stack.snapshot();
+
+  assert.deepEqual(sounds.list.map((s) => s.id), [1, 2]);
+  assert.ok(sounds.list.every((s) => s.builtin && !s.enabled));
+  for (let i = 0; i < stack.plates.length; i++) {
+    const expected = { ...before[i], sourceIds: before[i].sourceIds.filter((id) => id !== first.id && id !== second.id) };
+    assert.deepEqual(after[i], expected);
+    assert.deepEqual(sounds.poolFor(stack.plates[i]), []);
+  }
+});
+
+test('a cleared library can be reused and stays silent when its saved project is reopened', () => {
+  const removed = sounds.add('OLD SAMPLE', buffer(), false, false);
+  sounds.clearAll();
+  const saved = project.serialize();
+  assert.deepEqual(saved.sounds.user, []);
+  assert.deepEqual(saved.sounds.builtins, { GLASS: false, TICK: false });
+
+  const fresh = sounds.add('FRESH', buffer(), false, false);
+  assert.ok(fresh.id > removed.id, 'deleted sound identities must not be reused');
+  for (const p of stack.plates) assert.deepEqual(sounds.poolFor(p).map((s) => s.id), [fresh.id]);
+  assert.ok(sounds.list.filter((s) => s.builtin).every((s) => !s.enabled));
+
+  project.apply(saved);
+  assert.equal(sounds.get(fresh.id), undefined);
+  for (const p of stack.plates) assert.deepEqual(sounds.poolFor(p), []);
+
+  sounds.setAllBuiltins(true);
+  assert.deepEqual(sounds.list.filter((s) => s.builtin && s.enabled).map((s) => s.name), ['GLASS', 'TICK']);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function assertClearedLibrary() {
+  assert.ok(sounds.list.every((s) => s.builtin && !s.enabled));
+  for (const p of stack.plates) {
+    assert.deepEqual([...p.sourceIds], [1, 2]);
+    assert.deepEqual(sounds.poolFor(p), []);
+  }
+}
+
+test('a clear listener can start a fresh import while the pre-clear import is discarded', async (t) => {
+  installAudioBuffer(t);
+  const reading = deferred();
+  const oldFile = new File(['audio'], 'old.wav');
+  t.mock.method(oldFile, 'arrayBuffer', () => reading.promise);
+  t.mock.method(engine, 'ensureCtx', () => ({ decodeAudioData: () => Promise.resolve(recordingBuffer()) }));
+  const oldImport = sounds.addFile(oldFile);
+  let freshImport;
+  const unsubscribe = sounds.onChange(() => {
+    unsubscribe();
+    freshImport = sounds.addFile(new File(['audio'], 'fresh.wav'));
+  });
+  t.after(unsubscribe);
+
+  sounds.clearAll();
+  reading.resolve(new ArrayBuffer(4));
+  const [old, fresh] = await Promise.all([oldImport, freshImport]);
+  assert.equal(old, null);
+  assert.ok(fresh);
+  assert.equal(fresh.name, 'FRESH');
+  assert.equal(sounds.get(fresh.id), fresh);
+  assert.deepEqual(sounds.list.filter((sound) => !sound.builtin), [fresh]);
+  assert.ok(sounds.list.filter((sound) => sound.builtin).every((sound) => !sound.enabled));
+  for (const plate of stack.plates) {
+    assert.ok(plate.sourceIds.has(fresh.id));
+    assert.deepEqual(sounds.poolFor(plate), [fresh]);
+  }
+});
+
+test('an explicitly stale file import does not read the file or open audio', async (t) => {
+  const generation = sounds.generation;
+  sounds.clearAll();
+  const file = new File(['audio'], 'stale.wav');
+  const read = t.mock.method(file, 'arrayBuffer', () => { throw new Error('stale file was read'); });
+  const open = t.mock.method(engine, 'ensureCtx', () => { throw new Error('stale import opened audio'); });
+  assert.equal(await sounds.addFile(file, generation), null);
+  assert.equal(read.mock.callCount(), 0);
+  assert.equal(open.mock.callCount(), 0);
+  assertClearedLibrary();
+});
+
+for (const outcome of ['resolve', 'reject']) {
+  test(`clearing during file reading discards a late ${outcome} without decoding or restoring sources`, async (t) => {
+    const reading = deferred();
+    const file = new File(['audio'], 'old.wav');
+    t.mock.method(file, 'arrayBuffer', () => reading.promise);
+    const decode = t.mock.fn(() => { throw new Error('stale file was decoded'); });
+    t.mock.method(engine, 'ensureCtx', () => ({ decodeAudioData: decode }));
+    const old = sounds.add('OLD', buffer(), false, false);
+    stack.plates.forEach((p) => p.sourceIds.add(old.id));
+
+    const importing = sounds.addFile(file);
+    sounds.clearAll();
+    if (outcome === 'resolve') reading.resolve(new ArrayBuffer(4));
+    else reading.reject(new Error('old disk read failed'));
+
+    assert.equal(await importing, null);
+    assert.equal(decode.mock.callCount(), 0);
+    assert.equal(sounds.get(old.id), undefined);
+    assertClearedLibrary();
+  });
+
+  test(`clearing during audio decoding discards a late ${outcome} without registering a sample`, async (t) => {
+    installAudioBuffer(t);
+    const decoding = deferred(), enteredDecode = deferred();
+    t.mock.method(engine, 'ensureCtx', () => ({
+      decodeAudioData() { enteredDecode.resolve(); return decoding.promise; },
+    }));
+    const importing = sounds.addFile(new File(['audio'], 'old.wav'));
+    await enteredDecode.promise;
+    sounds.clearAll();
+    const nextId = sounds.nextId;
+    if (outcome === 'resolve') decoding.resolve(recordingBuffer());
+    else decoding.reject(new Error('old decoder failed'));
+
+    assert.equal(await importing, null);
+    assert.equal(sounds.nextId, nextId);
+    assertClearedLibrary();
+  });
+}
+
+test('a fresh file after clear is actually conditioned and added to every plate pool', async (t) => {
+  installAudioBuffer(t);
+  sounds.clearAll();
+  const decoded = recordingBuffer();
+  const original = Array.from({ length: decoded.numberOfChannels }, (_, channel) => decoded.getChannelData(channel).slice());
+  t.mock.method(engine, 'ensureCtx', () => ({ decodeAudioData: () => Promise.resolve(decoded) }));
+
+  const sound = await sounds.addFile(new File(['audio'], 'fresh.wav'));
+  assert.equal(sound.name, 'FRESH');
+  assert.equal(sound.builtin, false);
+  assert.equal(sound.enabled, true);
+  assert.ok(sound.buffer instanceof TestAudioBuffer);
+  assert.notEqual(sound.buffer, decoded);
+  assert.equal(sound.buffer.numberOfChannels, 1);
+  assert.equal(sound.buffer.sampleRate, decoded.sampleRate);
+  assert.ok(sound.buffer.length >= 64 && sound.buffer.length < decoded.length);
+  const samples = sound.buffer.getChannelData(0);
+  assert.ok(samples.some((sample) => Math.abs(sample) > 0.01));
+  assert.ok(samples.every((sample) => Number.isFinite(sample) && Math.abs(sample) <= 1));
+  for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+    assert.deepEqual(decoded.getChannelData(channel), original[channel], 'conditioning must not alter decoder-owned input');
+  }
+  assert.deepEqual(sound.onsets[0], 0);
+  assert.equal(sounds.get(sound.id), sound);
+  for (const p of stack.plates) {
+    assert.ok(p.sourceIds.has(sound.id));
+    assert.deepEqual(sounds.poolFor(p), [sound]);
+  }
+  assert.ok(sounds.list.filter((s) => s.builtin).every((s) => !s.enabled));
+});
+
+for (const stage of ['read', 'decode']) {
+  test(`a current-generation ${stage} failure still rejects rather than being treated as cancelled`, async (t) => {
+    const failure = new Error(`current ${stage} failure`);
+    const file = new File(['audio'], 'broken.wav');
+    t.mock.method(engine, 'ensureCtx', () => ({ decodeAudioData: () => Promise.reject(failure) }));
+    if (stage === 'read') t.mock.method(file, 'arrayBuffer', () => Promise.reject(failure));
+    await assert.rejects(sounds.addFile(file), (err) => err === failure);
+    assert.deepEqual(sounds.list.map((s) => s.id), [1, 2]);
+    assert.ok(stack.plates.every((p) => p.sourceIds.size === 2));
+  });
+}
 
 test('native buffer construction errors are staged before any machine mutation', (t) => {
   const saved = project.serialize();

@@ -304,6 +304,9 @@ function SoundsBlock() {
           {app.resampling ? '⟲ CAPTURING…' : '⟲ RESAMPLE 4s'}
         </button>
         <Toggle id="btn-builtins" on={list.some((s) => s.builtin && s.enabled)} title="Enable / disable synthesized sources" onClick={() => app.toggleBuiltins()}>BUILT-INS</Toggle>
+        <button id="btn-clear-sounds" disabled={!list.some((s) => !s.builtin || s.enabled) && app.importsPending === 0 && mic.state === 'idle' && !app.resampling}
+          title="Remove all added sounds and turn off built-ins; keep patterns and layer settings"
+          onClick={() => app.clearSounds()}>CLEAR ALL</button>
       </div>
       <SoundList />
     </section>

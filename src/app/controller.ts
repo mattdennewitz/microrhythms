@@ -34,6 +34,7 @@ export const app = {
   shareBusy: false,
   mic: { state: 'idle' as 'idle' | 'starting' | 'recording', elapsed: 0 },
   resampling: false,
+  importsPending: 0,
   panelEl: null as HTMLElement | null,
 
   /** Visually hidden live region for state changes (play/stop, switches). */
@@ -322,34 +323,56 @@ export const app = {
   },
 
   async addFiles(files: FileList | File[] | null) {
-    for (const f of Array.from(files || [])) {
-      try {
-        const snd = await sounds.addFile(f);
-        this.toast(`${snd.name} (${snd.buffer.duration.toFixed(1)}s · ${snd.onsets.length} onsets) → all plates`);
-      } catch (err) {
-        const silent = /silent/.test((err as Error | null)?.message || '');
-        this.toast(silent ? `${f.name} is silent or too short — not added` : `could not decode ${f.name}`);
-        console.warn('add sound failed', f.name, err);
+    const batch = Array.from(files || []);
+    if (!batch.length) return;
+    const generation = sounds.generation;
+    this.importsPending++; notify();
+    try {
+      for (const f of batch) {
+        if (generation !== sounds.generation) break;
+        try {
+          const snd = await sounds.addFile(f, generation);
+          if (generation !== sounds.generation || !snd) break;
+          this.toast(`${snd.name} (${snd.buffer.duration.toFixed(1)}s · ${snd.onsets.length} onsets) → all plates`);
+        } catch (err) {
+          if (generation !== sounds.generation) break;
+          const silent = /silent/.test((err as Error | null)?.message || '');
+          this.toast(silent ? `${f.name} is silent or too short — not added` : `could not decode ${f.name}`);
+          console.warn('add sound failed', f.name, err);
+        }
       }
+    } finally {
+      if (generation === sounds.generation) { this.importsPending--; notify(); }
     }
   },
 
   rec: null as Capture | null,
+  resampleCapture: null as Capture | null,
   recTimer: undefined as ReturnType<typeof setInterval> | undefined,
   async toggleMic() {
     if (this.mic.state === 'starting') return; // permission prompt / device still opening
     if (this.rec) { this.rec.stop(); return; }
+    const generation = sounds.generation;
     this.mic = { state: 'starting', elapsed: 0 }; notify();
     try {
-      this.rec = await engine.recordMic(20, (buf: AudioBuffer) => {
+      const rec = await engine.recordMic(20, (buf: AudioBuffer) => {
+        if (generation !== sounds.generation) return;
         clearInterval(this.recTimer);
+        this.recTimer = undefined;
         this.rec = null;
         this.mic = { state: 'idle', elapsed: 0 }; notify();
-        this.addBuffer('MIC', buf);
+        if (generation === sounds.generation) this.addBuffer('MIC', buf);
       });
-      this.mic = { state: 'recording', elapsed: 0 }; notify();
-      this.recTimer = setInterval(() => { if (this.rec) { this.mic = { state: 'recording', elapsed: this.rec.elapsed() }; notify(); } }, 100);
+      if (generation !== sounds.generation) { rec.stop(); return; }
+      this.rec = rec;
+      this.mic = { state: 'recording', elapsed: 0 };
+      this.recTimer = setInterval(() => {
+        if (generation !== sounds.generation || this.rec !== rec) return;
+        this.mic = { state: 'recording', elapsed: rec.elapsed() }; notify();
+      }, 100);
+      notify();
     } catch (err) {
+      if (generation !== sounds.generation) return;
       this.rec = null;
       this.mic = { state: 'idle', elapsed: 0 }; notify();
       this.toast(`mic unavailable: ${(err as Error).message || (err as Error).name}`);
@@ -359,10 +382,13 @@ export const app = {
   resample() {
     if (this.resampling) return; // one capture at a time
     if (!engine.playing) { this.toast('press play first — resample captures the output'); return; }
+    const generation = sounds.generation;
     this.resampling = true; notify();
-    engine.resample(4, (buf: AudioBuffer) => {
+    this.resampleCapture = engine.resample(4, (buf: AudioBuffer) => {
+      if (generation !== sounds.generation) return;
+      this.resampleCapture = null;
       this.resampling = false; notify();
-      this.addBuffer('RESAMPLE', buf);
+      if (generation === sounds.generation) this.addBuffer('RESAMPLE', buf);
     });
   },
 
@@ -384,6 +410,21 @@ export const app = {
     // the button reflects the list: on if any built-in is enabled
     const on = !sounds.list.some((s) => s.builtin && s.enabled);
     sounds.setAllBuiltins(on);
+  },
+  clearSounds() {
+    sounds.clearAll();
+    const rec = this.rec, resampleCapture = this.resampleCapture;
+    this.rec = null;
+    this.resampleCapture = null;
+    clearInterval(this.recTimer);
+    this.recTimer = undefined;
+    this.mic = { state: 'idle', elapsed: 0 };
+    this.resampling = false;
+    this.importsPending = 0;
+    rec?.stop();
+    resampleCapture?.stop();
+    this.toast('samples cleared · built-ins off');
+    this.announce('All added sounds removed. Built-in sounds turned off.');
   },
 
   // ---------------------------------------------------------------- stage

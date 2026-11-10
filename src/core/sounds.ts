@@ -290,6 +290,7 @@ function userCapacity(list: readonly Sound[], frames: number, sampleRate: number
 export const sounds = {
   list: [] as Sound[],
   nextId: 1,
+  generation: 0,
   listeners: new Set<() => void>(),
   /** Subscribe; returns an unsubscribe function. */
   onChange(fn: () => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; },
@@ -340,15 +341,24 @@ export const sounds = {
     return snd;
   },
 
-  async addFile(file: File): Promise<Sound> {
-    const ctx = engine.ensureCtx();
-    const arr = await file.arrayBuffer();
-    const buf = await new Promise<AudioBuffer>((res, rej) => {
-      const p = ctx.decodeAudioData(arr, res, rej);
-      if (p && p.then) p.then(res, rej);
-    });
-    const base = file.name.replace(/\.[^.]+$/, '').toUpperCase().slice(0, 18) || 'SAMPLE';
-    return this.addUser(base, buf);
+  async addFile(file: File, generation?: number): Promise<Sound | null> {
+    generation ??= this.generation;
+    if (generation !== this.generation) return null;
+    try {
+      const ctx = engine.ensureCtx();
+      const arr = await file.arrayBuffer();
+      if (generation !== this.generation) return null;
+      const buf = await new Promise<AudioBuffer>((res, rej) => {
+        const p = ctx.decodeAudioData(arr, res, rej);
+        if (p && p.then) p.then(res, rej);
+      });
+      if (generation !== this.generation) return null;
+      const base = file.name.replace(/\.[^.]+$/, '').toUpperCase().slice(0, 18) || 'SAMPLE';
+      return this.addUser(base, buf);
+    } catch (err) {
+      if (generation !== this.generation) return null;
+      throw err;
+    }
   },
 
   remove(id: number) {
@@ -356,6 +366,21 @@ export const sounds = {
     if (!s || s.builtin) return;
     this.list = this.list.filter((x) => x.id !== id);
     stack.plates.forEach((p) => p.sourceIds.delete(id));
+    this.emit();
+  },
+
+  /** Remove user sounds and disable stock sources without changing the patterns. */
+  clearAll() {
+    this.generation++;
+    const removed = new Set<number>();
+    this.list = this.list.filter((s) => {
+      if (!s.builtin) { removed.add(s.id); return false; }
+      s.enabled = false;
+      return true;
+    });
+    for (const p of stack.plates) {
+      for (const id of p.sourceIds) if (removed.has(id)) p.sourceIds.delete(id);
+    }
     this.emit();
   },
 
