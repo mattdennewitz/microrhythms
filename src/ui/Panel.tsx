@@ -23,7 +23,7 @@ function nearestIndex(arr: number[], v: number) {
 const FX_TYPES: FxType[] = ['ratchet', 'stutter', 'reverse', 'throw'];
 const FX_TITLES: Record<FxType, string> = {
   ratchet: 'repeats that subdivide the step', stutter: 'repeats that climb or fall in pitch',
-  reverse: 'fragment plays backwards', throw: 'sent into the tempo-synced delay',
+  reverse: 'fragment plays backwards', throw: 'Pre-fader tempo-synced delay: THROW WET controls tagged echoes, even at plate LEVEL 0',
 };
 const PHRASES = [4, 8, 16, 32];
 
@@ -65,11 +65,12 @@ function Transport() {
           fmt={pct} onInput={(v) => set(() => engine.setMaster(v))} />
         <Slider id="space" label="SPACE" min={0} max={1} step={0.01} reset={0.28} value={engine.spaceLevel}
           fmt={pct} onInput={(v) => set(() => engine.setSpace(v))} />
-        <Slider id="sep" label="SEPARATION" min={0.3} max={2.4} step={0.01} reset={1.25} value={view.sepTarget}
+        <Slider id="sep" label="SPACING" min={0.3} max={2.4} step={0.01} reset={1.25} value={view.sepTarget}
           fmt={pct} onInput={(v) => set(() => { view.sepTarget = v; })} />
         <Slider id="evolve" label="EVOLVE" min={0} max={1} step={0.01} reset={0} value={engine.evolveAmount}
           fmt={(v) => (v === 0 ? 'OFF' : `${Math.round(v * 100)}%/BAR`)} onInput={(v) => set(() => { engine.evolveAmount = v; })} />
       </div>
+      <p className="hint">SPACING moves the discs in both the view and spatial audio: depth is distance from the listener. It also changes flight distances. Use the layer meters to select overlapping discs.</p>
       <div className="row">
         <Toggle id="btn-ear" on={engine.earMode === 'camera'} title="Where you listen from" onClick={() => app.toggleEar()}>EAR: {engine.earMode.toUpperCase()}</Toggle>
         <button id="btn-pan" title="Spatialisation model" onClick={() => app.togglePan()}>PAN: {engine.panModel === 'HRTF' ? 'HRTF' : 'EQUAL'}</button>
@@ -170,6 +171,7 @@ function Compose() {
         <Slider id="fxwet" label="THROW WET" min={0} max={1} step={0.01} reset={0.5} value={engine.fxWet}
           fmt={pct} onInput={(v) => { engine.setFxWet(v); notify(); }} />
       </div>
+      <p className="hint">Tagged THROW is pre-fader: plate LEVEL controls dry sound and ordinary SPACE, not the tagged delay. THROW WET controls those echoes even at LEVEL 0.</p>
       <div className="row">
         <button id="btn-undo" title="Undo (⌘/Ctrl-Z)" disabled={!history.past.length} onClick={() => app.undo()}>
           {`↶ UNDO${history.past.length ? ' ' + history.past.length : ''}`}

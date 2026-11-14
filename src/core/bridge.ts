@@ -11,6 +11,8 @@ export interface UiBridge {
   togglePlay(): void | Promise<void>;
   toggleFlight(): void;
   syncAutopilot(): void;
+  /** Cancel pending sound UI work after the outgoing sound generation is invalidated. */
+  cancelSoundWork(): void;
   /** Refresh every control from state (after opening a project). */
   syncAll(): void;
 }
@@ -22,6 +24,7 @@ const fallback: UiBridge = {
   togglePlay() {},
   toggleFlight() {},
   syncAutopilot() {},
+  cancelSoundWork() {},
   syncAll() {},
 };
 

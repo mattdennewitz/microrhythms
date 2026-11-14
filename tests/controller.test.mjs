@@ -5,6 +5,8 @@ import { subscribe } from '../src/app/store.ts';
 import { sounds } from '../src/core/sounds.ts';
 import { stack } from '../src/core/stack.ts';
 import { engine } from '../src/core/engine.ts';
+import { project } from '../src/core/project.ts';
+import { registerUi, ui } from '../src/core/bridge.ts';
 import { installAudioBuffer, recordingBuffer, TestAudioBuffer } from './audio-buffer.mjs';
 
 function deferred() {
@@ -14,6 +16,7 @@ function deferred() {
 }
 
 let intervals, intervalStarts;
+const defaultUi = ui;
 
 beforeEach((t) => {
   installAudioBuffer(t);
@@ -36,7 +39,9 @@ beforeEach((t) => {
     rec: null, recTimer: undefined, resampleCapture: null,
     mic: { state: 'idle', elapsed: 0 }, resampling: false, importsPending: 0,
     toastMsg: { text: '', n: 0 }, announceMsg: { text: '', n: 0 },
+    slots: [null, null, null, null], activeSlot: null,
   });
+  registerUi(app);
 });
 
 afterEach(() => {
@@ -49,6 +54,7 @@ afterEach(() => {
   });
   sounds.list = []; sounds.listeners.clear(); stack.plates = [];
   Object.assign(engine, { ctx: null, playing: false, pending: [] });
+  registerUi(defaultUi);
 });
 
 function deferredFile(t, name) {
@@ -403,3 +409,196 @@ test('a genuine microphone permission error stays visible and a fresh retry rema
   assert.equal(intervals.size, 0);
   assertUserSounds(['MIC']);
 });
+
+function replacementProject() {
+  const saved = project.serialize();
+  saved.sounds.builtins.GLASS = false;
+  saved.sounds.builtins.TICK = true;
+  saved.sounds.user = [{ id: 70, name: 'LOADED', enabled: true, sampleRate: 48000, pcm16: 'AAA=' }];
+  saved.plates.forEach((plate) => { plate.sourceIds = [2, 70]; });
+  return saved;
+}
+
+function assertReplacementLibrary(extra = []) {
+  assert.deepEqual(sounds.list.filter((sound) => !sound.builtin).map((sound) => sound.name), ['LOADED', ...extra]);
+  assert.equal(sounds.byName('GLASS').enabled, false);
+  assert.equal(sounds.byName('TICK').enabled, true);
+  for (const plate of stack.plates) {
+    assert.ok(plate.sourceIds.has(70));
+    for (const name of extra) assert.ok(plate.sourceIds.has(sounds.byName(name).id));
+  }
+}
+
+for (const stage of ['read', 'decode']) {
+  for (const outcome of ['resolve', 'reject']) {
+    test(`project replacement cancels an outgoing deferred ${stage} ${outcome} without disturbing a fresh import`, async (t) => {
+      const saved = replacementProject();
+      const first = deferredFile(t, 'outgoing.wav'), remaining = deferredFile(t, 'never-started.wav');
+      const decoding = deferred(), enteredDecode = deferred();
+      let decodes = 0;
+      const decode = decoder(t, () => {
+        if (stage === 'decode' && ++decodes === 1) { enteredDecode.resolve(); return decoding.promise; }
+        return Promise.resolve(recordingBuffer());
+      });
+      const importing = app.addFiles([first.file, remaining.file]);
+      if (stage === 'decode') { first.reading.resolve(new ArrayBuffer(4)); await enteredDecode.promise; }
+      assert.equal(app.importsPending, 1);
+      const generation = sounds.generation;
+
+      project.apply(saved);
+      assert.notEqual(sounds.generation, generation);
+      assert.equal(app.importsPending, 0);
+      const loaded = sounds.get(70);
+      const fresh = deferredFile(t, 'fresh.wav');
+      const freshImport = app.addFiles([fresh.file]);
+      const replaced = feedback();
+      assert.equal(app.importsPending, 1);
+      const obsolete = stage === 'read' ? first.reading : decoding;
+      if (outcome === 'resolve') obsolete.resolve(stage === 'read' ? new ArrayBuffer(4) : recordingBuffer());
+      else obsolete.reject(new Error('outgoing I/O failed'));
+      await importing;
+      assert.equal(remaining.read.mock.callCount(), 0);
+      assert.equal(decode.mock.callCount(), stage === 'decode' ? 1 : 0);
+      assert.equal(app.importsPending, 1, 'old finalizers must not decrement a replacement batch');
+      assert.deepEqual(feedback(), replaced);
+      assert.equal(sounds.get(70), loaded);
+      assertReplacementLibrary();
+
+      fresh.reading.resolve(new ArrayBuffer(4));
+      await freshImport;
+      assert.equal(app.importsPending, 0);
+      assert.equal(sounds.get(70), loaded);
+      assertReplacementLibrary(['FRESH']);
+    });
+  }
+}
+
+for (const outcome of ['grant', 'reject']) {
+  test(`project replacement makes an outgoing microphone permission ${outcome} harmless to a new recording`, async (t) => {
+    const saved = replacementProject(), requests = microphoneInput(t);
+    const oldStart = app.toggleMic();
+    assert.equal(app.mic.state, 'starting');
+    project.apply(saved);
+    assert.deepEqual(app.mic, { state: 'idle', elapsed: 0 });
+    const newStart = app.toggleMic();
+    requests[1].permission.resolve(requests[1].capture);
+    await newStart;
+    const timer = app.recTimer, state = app.mic, replaced = feedback(), loaded = sounds.get(70);
+
+    if (outcome === 'grant') requests[0].permission.resolve(requests[0].capture);
+    else requests[0].permission.reject(new Error('outgoing permission denied'));
+    await oldStart;
+    if (outcome === 'grant') assert.equal(requests[0].resource.stops, 1);
+    assert.equal(app.rec, requests[1].capture);
+    assert.equal(app.recTimer, timer);
+    assert.equal(app.mic, state);
+    assert.equal(intervals.size, 1);
+    assert.equal(intervalStarts, 1);
+    assert.deepEqual(feedback(), replaced);
+    assert.equal(sounds.get(70), loaded);
+    assertReplacementLibrary();
+
+    requests[1].complete();
+    assert.equal(app.rec, null);
+    assert.equal(app.recTimer, undefined);
+    assert.equal(intervals.size, 0);
+    assertReplacementLibrary(['MIC']);
+  });
+}
+
+test('project replacement invalidates active captures before stop callbacks and late completions cannot reset new captures', async (t) => {
+  const saved = replacementProject(), mics = microphoneInput(t), resamples = resampleInput(t);
+  const starting = app.toggleMic();
+  mics[0].permission.resolve(mics[0].capture);
+  await starting;
+  engine.playing = true;
+  app.resample();
+  const generation = sounds.generation;
+  const stop = t.mock.method(engine, 'stop', () => {
+    assert.notEqual(sounds.generation, generation);
+    assert.ok(mics[0].resource.released && resamples[0].resource.released);
+    engine.playing = false;
+  });
+
+  project.apply(saved);
+  assert.equal(stop.mock.callCount(), 1);
+  for (const request of [mics[0], resamples[0]]) assert.equal(request.resource.stops, 1);
+  assert.equal(app.rec, null);
+  assert.equal(app.resampleCapture, null);
+  assert.equal(app.recTimer, undefined);
+  assert.deepEqual(app.mic, { state: 'idle', elapsed: 0 });
+  assert.equal(app.resampling, false);
+  assert.equal(intervals.size, 0);
+  assertReplacementLibrary();
+
+  const loaded = sounds.get(70), freshStart = app.toggleMic();
+  mics[1].permission.resolve(mics[1].capture);
+  await freshStart;
+  engine.playing = true;
+  app.resample();
+  const timer = app.recTimer, state = app.mic, replaced = feedback();
+  mics[0].complete();
+  resamples[0].complete();
+  assert.equal(app.rec, mics[1].capture);
+  assert.equal(app.recTimer, timer);
+  assert.equal(app.mic, state);
+  assert.equal(app.resampleCapture, resamples[1].capture);
+  assert.equal(app.resampling, true);
+  assert.equal(intervals.size, 1);
+  assert.deepEqual(feedback(), replaced);
+  assert.equal(sounds.get(70), loaded);
+  assertReplacementLibrary();
+  mics[1].complete();
+  resamples[1].complete();
+  assert.equal(app.rec, null);
+  assert.equal(app.resampleCapture, null);
+  assert.equal(app.resampling, false);
+  assert.equal(intervals.size, 0);
+  assertReplacementLibrary(['MIC', 'RESAMPLE']);
+});
+
+for (const stage of ['validation', 'native buffer']) {
+  test(`a project ${stage} failure leaves pending imports and captures in the outgoing generation`, async (t) => {
+    const saved = replacementProject(), mics = microphoneInput(t), resamples = resampleInput(t);
+    decoder(t);
+    const first = deferredFile(t, 'outgoing.wav');
+    const importing = app.addFiles([first.file]);
+    const starting = app.toggleMic();
+    mics[0].permission.resolve(mics[0].capture);
+    await starting;
+    engine.playing = true;
+    app.resample();
+    const current = project.serialize(), timer = app.recTimer, state = app.mic, generation = sounds.generation;
+    let rejectNative = stage === 'native buffer';
+    if (stage === 'validation') saved.global.bpm = 0;
+    else {
+      const makeBuffer = sounds.makeBuffer;
+      t.mock.method(sounds, 'makeBuffer', (...args) => {
+        if (rejectNative) throw new Error('unsupported native sample rate');
+        return makeBuffer(...args);
+      });
+    }
+
+    assert.throws(() => project.apply(saved));
+    assert.equal(sounds.generation, generation);
+    assert.equal(engine.playing, true);
+    assert.deepEqual(project.serialize(), current);
+    assert.equal(app.importsPending, 1);
+    assert.equal(app.rec, mics[0].capture);
+    assert.equal(app.recTimer, timer);
+    assert.equal(app.mic, state);
+    assert.equal(app.resampleCapture, resamples[0].capture);
+    assert.equal(app.resampling, true);
+    assert.equal(intervals.size, 1);
+    for (const request of [mics[0], resamples[0]]) assert.equal(request.resource.stops, 0);
+
+    rejectNative = false;
+    first.reading.resolve(new ArrayBuffer(4));
+    await importing;
+    mics[0].complete();
+    resamples[0].complete();
+    assert.equal(app.importsPending, 0);
+    assert.deepEqual(sounds.list.filter((sound) => !sound.builtin).map((sound) => sound.name), ['OUTGOING', 'MIC', 'RESAMPLE']);
+    assert.equal(intervals.size, 0);
+  });
+}

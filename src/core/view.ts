@@ -28,6 +28,32 @@ export type ViewMode = 'ORBIT' | 'SPLIT';
 /** Camera basis + eye position. */
 export interface CameraPose { pos: Vec; fwd: Vec; right: Vec; up: Vec }
 
+function cameraPose(yaw: number, pitch: number, dist: number, target: Vec): CameraPose {
+  const pos = [
+    target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
+    target[1] + dist * Math.sin(pitch),
+    target[2] + dist * Math.cos(pitch) * Math.cos(yaw),
+  ];
+  const fwd = norm(sub(target, pos));
+  const right = norm(cross(fwd, [0, 1, 0]));
+  return { pos, fwd, right, up: cross(right, fwd) };
+}
+
+interface ChipGeometry {
+  a: number; hwA: number; th: number;
+  q0: Projected; q1: Projected; q2: Projected; q3: Projected;
+}
+// Drawing and picking are synchronous; reuse the result rather than allocating a
+// bounds object for every chip on every frame. Projected vertices remain separate.
+const chipGeometry = {} as ChipGeometry;
+const edgeSide = (a: Projected, b: Projected, x: number, y: number): number =>
+  (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+const inChipQuad = (q: ChipGeometry, x: number, y: number): boolean => {
+  const a = edgeSide(q.q0, q.q1, x, y), b = edgeSide(q.q1, q.q2, x, y);
+  const c = edgeSide(q.q2, q.q3, x, y), d = edgeSide(q.q3, q.q0, x, y);
+  return Math.min(a, b, c, d) >= -1e-8 || Math.max(a, b, c, d) <= 1e-8;
+};
+
 /** What pick() found under a screen point. */
 export interface PickHit {
   plate: Plate;
@@ -55,6 +81,7 @@ export const view = {
   sep: 1.25, sepTarget: 1.25,
   mode: 'ORBIT' as ViewMode,
   pos: [0, 0, 0] as Vec, fwd: [0, 0, -1] as Vec, right: [1, 0, 0] as Vec, up: [0, 1, 0] as Vec, F: 800, cx: 0, cy: 0,
+  orbitPose: cameraPose(HOME.yaw, HOME.pitch, HOME.dist, HOME.target),
   frame: 0,
   hover: null as ViewHover | null,          // {plate, chip}
   glow: null as HTMLCanvasElement | null, small: null as HTMLCanvasElement | null, sg: null as CanvasRenderingContext2D | null, grain: null as HTMLCanvasElement | null, vignette: null as HTMLCanvasElement | null,
@@ -136,15 +163,7 @@ export const view = {
   plateX(p: Plate): number { return p.x * this.sep; },
 
   poseFor(yaw: number, pitch: number, dist: number, target: Vec): CameraPose {
-    const pos = [
-      target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
-      target[1] + dist * Math.sin(pitch),
-      target[2] + dist * Math.cos(pitch) * Math.cos(yaw),
-    ];
-    const fwd = norm(sub(target, pos));
-    const right = norm(cross(fwd, [0, 1, 0]));
-    const up = cross(right, fwd);
-    return { pos, fwd, right, up };
+    return cameraPose(yaw, pitch, dist, target);
   },
   homePose(): CameraPose { return this.poseFor(HOME.yaw, HOME.pitch, HOME.dist, HOME.target); },
 
@@ -157,7 +176,9 @@ export const view = {
     const ar = Math.sin(this.orbitPhase * 0.37) * 0.8 * DEG;
     this.yaw = HOME.yaw + this.dragYaw + ay;
     this.pitch = clamp(HOME.pitch + this.dragPitch + ap, -70 * DEG, 70 * DEG);
-    this.dist = HOME.dist * this.zoom * (this.mode === 'SPLIT' ? 1.12 : 1);
+    // Pull back with an expanded stack so the front discs stay clear of the panel.
+    // Zoom remains a user-controlled multiplier; flight keeps its own camera pose.
+    this.dist = HOME.dist * Math.max(1, this.sep / 1.25) * this.zoom * (this.mode === 'SPLIT' ? 1.12 : 1);
     this.target = [HOME.target[0] * this.sep, 0, 0];
     const pose = this.poseFor(this.yaw, this.pitch, this.dist, this.target);
     // slight camera roll, like a handheld orbit
@@ -165,6 +186,8 @@ export const view = {
     const right = [pose.right[0] * c + pose.up[0] * s, pose.right[1] * c + pose.up[1] * s, pose.right[2] * c + pose.up[2] * s];
     const up = [pose.up[0] * c - pose.right[0] * s, pose.up[1] * c - pose.right[1] * s, pose.up[2] * c - pose.right[2] * s];
     this.pos = pose.pos; this.fwd = pose.fwd; this.right = right; this.up = up;
+    pose.right = right; pose.up = up;
+    this.orbitPose = pose;
     const F = flight;
     this.near = F && F.on ? 0.03 : 0.2;
     if (F && F.on) {
@@ -173,10 +196,22 @@ export const view = {
     }
     const narrow = this.w < this.h;
     this.F = (narrow ? this.w * 0.78 : this.h * (F && F.on ? 0.8 : 1.05));
-    const panelW = ui.panelWidth() * this.dpr || 0;
-    this.cx = (this.w - panelW) * 0.5;
     const panelOpen = !document.body.classList.contains('panel-hidden');
-    this.cy = this.h * (narrow ? (panelOpen ? 0.27 : 0.46) : 0.5);
+    const bottomPanel = window.innerWidth <= 760;
+    const panel = panelOpen ? document.getElementById('panel')?.getBoundingClientRect() : null;
+    const bounds = this.canvas?.getBoundingClientRect();
+    let availableW = this.w, availableH = this.h;
+    if (panelOpen && bottomPanel) {
+      availableH = panel && bounds
+        ? clamp((panel.top - bounds.top) * this.h / bounds.height, 0, this.h)
+        : this.h * 0.52;
+    } else if (panelOpen) {
+      availableW = panel && bounds
+        ? clamp((panel.left - bounds.left) * this.w / bounds.width, 0, this.w)
+        : this.w - (ui.panelWidth() * this.dpr || 0);
+    }
+    this.cx = availableW * 0.5;
+    this.cy = availableH * 0.5;
   },
 
   // returns [sx, sy, depth, pxPerUnit] or null
@@ -200,6 +235,30 @@ export const view = {
     ]);
   },
 
+  /** Exact projected body shared by the renderer and pointer hit testing. */
+  chipGeometry(p: Plate, c: Chip, phi: number, bar = -1): ChipGeometry | null {
+    const a = c.angle + phi, stepA = TAU / p.steps;
+    const th = Math.min(p.trackW * 0.5, 0.045);
+    const hwA = Math.min(stepA * 0.42, Math.max(0.006, (0.012 + p.durFor(c) * 0.35) / c.radius) * 0.5);
+    const r0 = c.radius - th / 2;
+    let r1 = c.radius + th / 2, a0 = a - hwA, a1 = a + hwA;
+    if (bar >= 0) {
+      const span = Math.max(hwA, stepA * 0.36) * 2;
+      a0 = a - span / 2 + span * (bar / c.fxN);
+      a1 = a0 + (span / c.fxN) * 0.55;
+      if (c.fx === 'stutter') r1 = r0 + th * (bar / c.fxN) * 0.6 + th * 0.4;
+    }
+    const X = this.plateX(p);
+    const q0 = this.pp(X, r0, a0), q1 = this.pp(X, r1, a0);
+    const q2 = this.pp(X, r1, a1), q3 = this.pp(X, r0, a1);
+    if (!q0 || !q1 || !q2 || !q3) return null;
+    const lim = Math.max(this.w, this.h) * 3;
+    if (bar < 0 && (q0[2] < 0.08 || Math.abs(q0[0]) > lim || Math.abs(q0[1]) > lim || Math.abs(q2[0]) > lim || Math.abs(q2[1]) > lim)) return null;
+    chipGeometry.a = a; chipGeometry.hwA = hwA; chipGeometry.th = th;
+    chipGeometry.q0 = q0; chipGeometry.q1 = q1; chipGeometry.q2 = q2; chipGeometry.q3 = q3;
+    return chipGeometry;
+  },
+
   /** Which plate (and cell) is under a client point (CSS px), including a panned viewport? */
   pick(cssX: number, cssY: number, tv: number, playing: boolean): PickHit | null {
     const bounds = this.canvas!.getBoundingClientRect();
@@ -210,18 +269,46 @@ export const view = {
       const X = this.plateX(p);
       if (Math.abs(d[0]) < 1e-6) continue;
       const t = (X - this.pos[0]) / d[0];
-      if (t <= 0) continue;
+      // The near plane is measured along camera forward, not along the ray.
+      const depth = t * (d[0] * this.fwd[0] + d[1] * this.fwd[1] + d[2] * this.fwd[2]);
+      if (t <= 0 || depth < (this.near || 0.2)) continue;
       const y = this.pos[1] + t * d[1], z = this.pos[2] + t * d[2];
       const r = Math.hypot(y, z);
       if (r < p.rIn - 0.1 || r > p.rOut + 0.12) continue;
-      if (best && best.t < t) continue;
+      // A selection halo must not hide a real cell on a disc behind it.
+      const inAnnulus = r >= p.rIn && r <= p.rOut;
+      if (best && (best.inAnnulus && !inAnnulus || best.inAnnulus === inAnnulus && best.t < t)) continue;
       const a = Math.atan2(y, -z);
       const local = mod(a - p.angleAt(tv, playing), TAU);
       const track = clamp(Math.floor((r - p.rIn) / p.trackW), 0, p.tracks - 1);
       const sector = mod(Math.round(local / (TAU / p.steps)), p.steps);
       const key = track * p.steps + sector;
       const chip = p.chips.find((c) => c.key === key) || null;
-      best = { plate: p, t, r, track, sector, chip, inAnnulus: r >= p.rIn && r <= p.rOut };
+      best = { plate: p, t, r, track, sector, chip, inAnnulus };
+    }
+    if (best) {
+      const p = best.plate, phi = p.angleAt(tv, playing);
+      // Resolve the visible disc first, retaining annulus-over-halo priority.
+      // A swung/jittered chip body can extend into a different nominal cell.
+      if (flight.on || this.project(this.plateX(p), 0, 0)) {
+        for (let i = p.chips.length - 1; i >= 0; i--) {
+          const c = p.chips[i], body = this.chipGeometry(p, c, phi);
+          if (!body) continue;
+          let hit = false;
+          if (c.fx === 'ratchet' || c.fx === 'stutter') {
+            for (let bar = 0; bar < c.fxN && !hit; bar++) {
+              const q = this.chipGeometry(p, c, phi, bar);
+              hit = !!q && inChipQuad(q, sx, sy);
+            }
+          } else hit = inChipQuad(body, sx, sy);
+          if (hit) {
+            best.chip = c;
+            best.track = Math.floor(c.key / p.steps);
+            best.sector = c.key % p.steps;
+            break;
+          }
+        }
+      }
     }
     return best;
   },
@@ -486,14 +573,9 @@ export const view = {
 
     // --- chips: projected quads (tangential length ~ grain length)
     for (const c of p.chips) {
-      const a = c.angle + phi;
-      const dur = p.durFor(c);
-      const hwA = Math.min(stepA * 0.42, Math.max(0.006, (0.012 + dur * 0.35) / c.radius) * 0.5);
-      const r0 = c.radius - th / 2, r1 = c.radius + th / 2;
-      const q0 = this.pp(X, r0, a - hwA), q1 = this.pp(X, r1, a - hwA);
-      const q2 = this.pp(X, r1, a + hwA), q3 = this.pp(X, r0, a + hwA);
-      if (!q0 || !q1 || !q2 || !q3) continue;
-      if (q0[2] < 0.08 || Math.abs(q0[0]) > this.lim || Math.abs(q0[1]) > this.lim || Math.abs(q2[0]) > this.lim || Math.abs(q2[1]) > this.lim) continue;
+      const body = this.chipGeometry(p, c, phi);
+      if (!body) continue;
+      const { a, hwA, th, q0, q1, q2, q3 } = body;
       const k = playing && c.lastFire <= tv ? Math.exp(-(tv - c.lastFire) / 0.12) : 0;
       // asteroids right in front of the cockpit fade out unless they're sounding
       const nearK = this.near < 0.1 ? clamp((q0[2] - 0.08) / 0.7, 0, 1) : 1;
@@ -505,13 +587,11 @@ export const view = {
       const fx = c.fx;
       if (fx === 'ratchet' || fx === 'stutter') {
         // n thin bars across the step: the repeats
-        const n = c.fxN, span = Math.max(hwA, stepA * 0.36) * 2;
-        for (let k = 0; k < n; k++) {
-          const a0 = a - span / 2 + span * (k / n), a1 = a0 + (span / n) * 0.55;
-          const rr1 = fx === 'stutter' ? r0 + (r1 - r0) * (k / n) * 0.6 : r1;
-          const e0 = this.pp(X, r0, a0), e1 = this.pp(X, rr1 + (fx === 'stutter' ? th * 0.4 : 0), a0);
-          const e2 = this.pp(X, rr1 + (fx === 'stutter' ? th * 0.4 : 0), a1), e3 = this.pp(X, r0, a1);
-          if (e0 && e1 && e2 && e3) { path.moveTo(e0[0], e0[1]); path.lineTo(e1[0], e1[1]); path.lineTo(e2[0], e2[1]); path.lineTo(e3[0], e3[1]); path.closePath(); }
+        for (let k = 0; k < c.fxN; k++) {
+          const bar = this.chipGeometry(p, c, phi, k);
+          if (!bar) continue;
+          const { q0: e0, q1: e1, q2: e2, q3: e3 } = bar;
+          path.moveTo(e0[0], e0[1]); path.lineTo(e1[0], e1[1]); path.lineTo(e2[0], e2[1]); path.lineTo(e3[0], e3[1]); path.closePath();
         }
       } else if (fx === 'reverse') {
         const o = buckets.outline;
