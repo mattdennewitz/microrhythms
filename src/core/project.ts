@@ -154,6 +154,10 @@ export const project = {
       sound: u, buffer: sounds.makeBuffer(decodePcm(u.pcm16), u.sampleRate),
     }));
     const E = engine, S = stack, V = view, F = flight, X = exporter, U = ui;
+    // Invalidate before stop() can synchronously finish an outgoing capture.
+    // Keep this in core so standalone/default bridges also reject late imports.
+    sounds.generation++;
+    U.cancelSoundWork();
     if (E.playing) U.togglePlay();
     E.pending = [];
 
@@ -192,7 +196,12 @@ export const project = {
     // plates, holds, keep slots (sound ids remapped)
     S.restore(copySnapshot(obj.plates, idMap));
     obj.holds.forEach((h, i) => { S.plates[i].hold = h; });
-    S.plates.forEach((p) => p.assignFx());
+    S.plates.forEach((p) => {
+      // Project files carry seeds, not the outgoing machine's stopped position.
+      p.phiFrozen = p.phase0;
+      p.startMotion();
+      p.assignFx();
+    });
     S.selected = g.selected;
     U.slots = obj.keep.slots.map((slot) => slot === null ? null : copySnapshot(slot, idMap));
     U.activeSlot = obj.keep.active;

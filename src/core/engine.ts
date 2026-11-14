@@ -14,6 +14,7 @@ import { sounds } from './sounds';
 import { flight, type FlightCtx, type ExportFlightCtx, type SensorCursor, type ShipWindow } from './flight';
 import { view } from './view';
 import type { Chip, MotionSeg, Pose } from './types';
+import { captureLoopScore, type LoopGrain, type LoopPlan } from './loop-score';
 
 const LOOKAHEAD = 0.12;   // seconds scheduled ahead
 const TICK_MS = 25;
@@ -22,8 +23,23 @@ const DELAY_FEEDBACK = 0.45;
 const COMP_RELEASE = 0.22;
 let tickWorkerUrl: string | null = null;
 
+// Chromium's HRTF convolution tail + latency is <20 ms at supported export
+// rates. Keep a full second of silence before deterministic offline retirement,
+// rather than disconnecting a panner from an asynchronously delivered ended event.
+// TailTime + LatencyTime: chromium/src/third_party/blink/renderer/platform/audio/hrtf_panner.cc.
+const OFFLINE_VOICE_TAIL = 1;
+
+interface OfflineVoice {
+  retireAt: number;
+  nodes: [AudioBufferSourceNode, GainNode, GainNode, PannerNode];
+}
+
 /** One piece of the tempo map: from audio time t0 (song beat b0) at bps beats/s. */
 export interface ClockSeg { t0: number; b0: number; bps: number }
+
+/** THROW follows control time, while trigger tempo changes wait for the
+ *  scheduling horizon. The initial value preserves an in-progress target. */
+export interface ThrowSeg { t0: number; seconds: number; value?: number }
 
 /** A queued scene / phrase switch. */
 export interface Switch {
@@ -99,36 +115,6 @@ interface GrainOpts {
   throw?: boolean;
 }
 
-/** A resolved grain: sources, chance, FX expansion and spatial gain are chosen once. */
-interface LoopGrain {
-  plate: Plate;
-  key: number;
-  time: number;
-  buffer: AudioBuffer;
-  snd: number;
-  rate: number;
-  srcDur: number;
-  dur: number;
-  offset: number;
-  sourceOffset: number;
-  amp: number;
-  fadeIn: number;
-  fadeOut: number;
-  choke: boolean;
-  reverse: boolean;
-  throw: boolean;
-  sensor: boolean;
-  dist: number | null;
-  head: number;
-  x: number;
-  y: number;
-  z: number;
-  panModel: PanningModelType;
-}
-
-interface LoopPose { time: number; pose: Pose; tones: number[] }
-/** One musical window, shared by the mix and all stems before any await. */
-export interface LoopPlan { seconds: number; grains: LoopGrain[]; poses: LoopPose[] }
 
 export interface MixSnapshot { master: number; space: number; fxWet: number; levels: number[] }
 
@@ -146,6 +132,7 @@ export interface RenderOpts {
   flight?: ExportFlightCtx | null;
   listenerPose?: Pose | null;
   clock?: ClockSeg[] | null;
+  throwClock?: ThrowSeg[] | null;
   onProgress?: ((f: number) => void) | null;
   loop?: boolean;
   loopPlan?: LoopPlan | null;
@@ -175,6 +162,7 @@ export const engine = {
   lastScheduled: 0,
   startDelay: 0.06,       // PLAY starts bar 1 this long after the press
   clock: [{ t0: 0, b0: 0, bps: 112 / 60 }] as ClockSeg[],
+  throwClock: [] as ThrowSeg[],
   nextBarBeat: 4,
   pending: [] as Switch[],            // queued switches {beat, kind, apply, label}
   events: [] as EngineEvent[],             // visual events {t, plate, chip}
@@ -190,7 +178,7 @@ export const engine = {
   motions: null as Map<Plate, MotionSeg[]> | null,        // per-plate motion override (offline render)
   onlyPlate: null as Plate | null,        // render a single plate (stems)
   trace: null as Voice[] | null,            // optional array of scheduled grains (tests)
-  grainCapture: null as LoopGrain[] | null,
+  offlineVoices: null as OfflineVoice[] | null,
   onEvolve: null as ((p: Plate) => void) | null,
   onSwitch: null as ((sw: Switch) => void) | null,
 
@@ -210,6 +198,12 @@ export const engine = {
   delay: undefined as unknown as DelayNode,
   delayTone: undefined as unknown as BiquadFilterNode,
   delayFb: undefined as unknown as GainNode,
+
+  /** Frozen LOOP schedulers override these geometry/score injection boundaries. */
+  plates(): Plate[] { return stack.plates; },
+  restAt(p: Plate, B: number): boolean { return stack.restAt(p, B); },
+  plateX(p: Plate): number { return view.plateX(p); },
+  soundPool(p: Plate) { return sounds.poolFor(p); },
 
 
   /** Flight parameters in force for this engine: the live ship, or the export's
@@ -347,8 +341,9 @@ export const engine = {
     const ctx = this.ensureCtx();
     if (ctx.state !== 'running') { try { await ctx.resume(); } catch (e) { /* gesture needed */ } }
     if (this.playing) return;
-    const t = ctx.currentTime + this.startDelay;
+    const now = ctx.currentTime, t = now + this.startDelay;
     this.clock = [{ t0: t, b0: 0, bps: this.bpm / 60 }];
+    this.throwClock = [{ t0: now, seconds: this.delayTime(), value: this.delay.delayTime.value }];
     stack.plates.forEach((p) => p.startMotion());
     this.lastScheduled = t;
     this.nextBarBeat = 4;
@@ -356,7 +351,7 @@ export const engine = {
     this.sensorCursor = null;
     this.playing = true;
     // the flight path switches to the audio clock before the first tick reads it
-    if (flight && flight.on) flight.clockChanged();
+    if (flight) flight.clockChanged();
     this.startTimer();
   },
 
@@ -365,7 +360,7 @@ export const engine = {
     const B = this.beatAt(this.visualTime());
     stack.plates.forEach((p) => p.stopMotion(B));
     this.playing = false;
-    if (flight && flight.on) flight.clockChanged();
+    if (flight) flight.clockChanged();
     this.stopTimer();
     this.active.forEach((src) => { try { src.stop(); } catch (e) { /* already stopped */ } });
     this.active.clear();
@@ -442,8 +437,10 @@ export const engine = {
 
   setBpm(v: number): void {
     this.bpm = clamp(v, 30, 240);
-    if (this.ctx) this.delay.delayTime.setTargetAtTime(this.delayTime(), this.ctx.currentTime, 0.05);
+    const now = this.ctx?.currentTime ?? 0;
+    if (this.ctx) this.delay.delayTime.setTargetAtTime(this.delayTime(), now, 0.05);
     if (!this.ctx || !this.playing) return;
+    this.throwClock.push({ t0: now, seconds: this.delayTime() });
     const tH = this.horizon();
     const B = this.beatAt(tH);
     this.clock = this.clock.filter((s) => s.t0 < tH);
@@ -512,11 +509,11 @@ export const engine = {
 
   scheduleBeats(Ba: number, Bb: number): void {
     if (Bb <= Ba) return;
-    const anySolo = stack.anySolo();
+    const anySolo = this.plates().some((p) => p.solo);
     // live flight: fix the ship's path over this window first (sensor and proximity
     // both read it, and it's recorded so an export replays exactly the same path)
     if (!this.offline && flight && flight.on) flight.prepareWindow(this, Ba, Bb);
-    for (const p of stack.plates) {
+    for (const p of this.plates()) {
       if (this.onlyPlate ? p !== this.onlyPlate : !p.audible(anySolo)) continue;
       this.schedulePlate(p, Ba, Bb);
     }
@@ -549,7 +546,7 @@ export const engine = {
           let v = target + TAU * Math.ceil((lo - target) / TAU);
           while (v < hi) {
             const B = Math.round((sa + (v - phiA) / seg.w) * 1e9) / 1e9;
-            if (B >= sa && B < sb && !stack.restAt(p, B)) hits.push({ B, c, h: hθ });
+            if (B >= sa && B < sb && !this.restAt(p, B)) hits.push({ B, c, h: hθ });
             v += TAU;
           }
         }
@@ -557,9 +554,11 @@ export const engine = {
     }
     hits.sort((x, y) => x.B - y.B);
     const fcm = this.flightCtx();
-    const mix = fcm ? fcm.headMix : 1;
-    if (mix <= 0) return;
-    for (const hit of hits) this.fire(p, hit.c, this.timeAtBeat(hit.B), hit.h, hit.B, mix);
+    for (const hit of hits) {
+      const t = this.timeAtBeat(hit.B);
+      const mix = fcm && (!fcm.activeAt || fcm.activeAt(t)) ? fcm.headMix : 1;
+      if (mix > 0) this.fire(p, hit.c, t, hit.h, hit.B, mix);
+    }
   },
 
   /** Chance roll. Offline renders hash (seed, plate, chip, beat) so a stem
@@ -572,13 +571,14 @@ export const engine = {
   fire(p: Plate, c: Chip, t: number, headAngle: number, B: number, gainMul = 1, extra: FireExtra | null = null): void {
     this.stats.scheduled++;
     const sensor = !!(extra && extra.sensor);
-    const fc = this.flightCtx();
+    const context = this.flightCtx();
+    const fc = context && (!context.activeAt || context.activeAt(t)) ? context : null;
     // every asteroid the ship passes sounds, unless flight is set to respect plate chance
     const useChance = !sensor || (fc && fc.useChance);
     if (useChance && this.roll(p, c, B) > p.probFor(c)) return;
     // in flight, a fixed-head grain is as loud as it is close to the ship
     if (!sensor && fc) {
-      gainMul *= flight.proximityAt(fc.shipAt(t), p, c, headAngle, fc.falloff);
+      gainMul *= flight.proximityAt(fc.shipAt(t), p, c, headAngle, fc.falloff, this.plateX(p));
       if (gainMul < 0.004) return; // inaudible: don't spend a voice on it
     }
     const fx = this.fxOn ? c.fx : null;
@@ -617,7 +617,7 @@ export const engine = {
 
   playGrain(p: Plate, c: Chip, when: number, headAngle: number, opt: GrainOpts = {}): boolean {
     if (!this.offline && this.voices >= this.maxVoices) { this.stats.dropped++; return false; }
-    const pool = sounds.poolFor(p);
+    const pool = this.soundPool(p);
     if (!pool.length) return false;
     const snd = pool[c.srcPick % pool.length];
     // Reuse the fragment object; live playback does not allocate an extra event.
@@ -634,9 +634,8 @@ export const engine = {
     g.fadeIn = p.fadeIn; g.fadeOut = p.fadeOut; g.choke = p.choke;
     g.reverse = !!opt.reverse; g.throw = !!opt.throw;
     g.sensor = !!opt.extra?.sensor; g.dist = opt.extra?.dist ?? null; g.head = headAngle;
-    g.x = view.plateX(p); g.y = c.radius * Math.sin(headAngle); g.z = -c.radius * Math.cos(headAngle);
+    g.x = this.plateX(p); g.y = c.radius * Math.sin(headAngle); g.z = -c.radius * Math.cos(headAngle);
     g.panModel = this.panModel;
-    if (this.grainCapture) { this.grainCapture.push(g); return true; }
     return this.scheduleGrain(g, when);
   },
 
@@ -645,7 +644,9 @@ export const engine = {
     const p = g.plate;
     let chokeList: Voice[] | null = null;
     if (g.choke) {
-      chokeList = (this.chokeVoices.get(p) || []).filter((v) => v.end > when - 0.5);
+      // A far-ahead ratchet must not evict voices needed by an earlier hit
+      // scheduled next. Only rendered time is a monotonically safe floor.
+      chokeList = (this.chokeVoices.get(p) || []).filter((v) => v.end > this.ctx!.currentTime - 0.5);
       if (chokeList.some((v) => Math.abs(v.start - when) < 1e-6)) return false;
     }
     const ctx = this.ctx!;
@@ -693,10 +694,23 @@ export const engine = {
         src.disconnect(); env.disconnect(); choke.disconnect(); pan.disconnect();
       };
     } else {
-      src.onended = () => { src.disconnect(); env.disconnect(); choke.disconnect(); pan.disconnect(); };
+      this.offlineVoices?.push({ retireAt: when + g.dur + 0.02 + OFFLINE_VOICE_TAIL, nodes: [src, env, choke, pan] });
     }
     this.stats.triggers++;
     return true;
+  },
+
+  /** Retire only voices whose source and spatial tail have fully rendered. The
+   *  queue is bounded by active/future voices, not the complete export duration. */
+  retireOfflineVoices(time: number): void {
+    if (!this.offlineVoices) return;
+    let keep = 0;
+    for (const voice of this.offlineVoices) {
+      if (voice.retireAt <= time) {
+        for (const node of voice.nodes) node.disconnect();
+      } else this.offlineVoices[keep++] = voice;
+    }
+    this.offlineVoices.length = keep;
   },
 
   /** The grain sounds from where the chip sits as it crosses the head. */
@@ -736,14 +750,17 @@ export const engine = {
     }
   },
 
-  distanceTone(p: Plate, pose: Pose): number {
-    const fc = this.flightCtx();
+  distanceTone(p: Plate, pose: Pose, time?: number, before = false): number {
+    const at = time === undefined ? this.ctx?.currentTime ?? 0 : time;
+    const context = this.flightCtx();
+    const activeAt = context?.listenerActiveAt ?? context?.activeAt;
+    const fc = context && (!activeAt || activeAt(at, before)) ? context : null;
     if (fc) {
       // flying: plates darken with distance along the axis from the ship
-      const ax = Math.abs(view.plateX(p) - pose.pos[0]);
+      const ax = Math.abs(this.plateX(p) - pose.pos[0]);
       return clamp(18000 * Math.exp(-ax * 1.1 / Math.max(0.2, fc.falloff)), 500, 18000);
     }
-    const dx = view.plateX(p) - pose.pos[0], dy = -pose.pos[1], dz = -pose.pos[2];
+    const dx = this.plateX(p) - pose.pos[0], dy = -pose.pos[1], dz = -pose.pos[2];
     const d = Math.hypot(dx, dy, dz);
     return clamp(18000 * Math.exp(-(d - 4.5) * 0.32), 700, 18000);
   },
@@ -786,44 +803,31 @@ export const engine = {
   },
 
   // ------------------------------------------------------------ offline render
-  /** Resolve one window before any await. Repetitions keep its chance, source,
-   *  FX, grain and flight decisions rather than reading live state again. */
-  captureLoop(this: { bpm: number; rollSeed: number }, { seconds, beats = null, bpm = this.bpm, seed = this.rollSeed,
-    startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null }: RenderOpts): LoopPlan {
-    const off: Engine = Object.create(engine);
-    off.offline = true;
-    off.bpm = bpm;
-    off.clock = clock || [{ t0: 0, b0: startBeat, bps: bpm / 60 }];
-    off.motions = motions || new Map(stack.plates.map((p): [Plate, MotionSeg[]] =>
-      [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
-    off.flightRender = flight;
-    off.sensorCursor = null;
-    off.onlyPlate = null;
-    off.rollSeed = seed >>> 0;
-    off.stats = { triggers: 0, dropped: 0, scheduled: 0 };
-    const grains: LoopGrain[] = off.grainCapture = [];
-    const endBeat = beats == null ? off.beatAt(seconds!) : startBeat + beats;
-    seconds = off.timeAtBeat(endBeat);
-    const chunk = 0.1 * bpm / 60;
-    for (let k = 0; startBeat + k * chunk < endBeat; k++) {
-      off.scheduleBeats(startBeat + k * chunk, Math.min(endBeat, startBeat + (k + 1) * chunk));
-    }
-    // FX sub-grains crossing the endpoint wrap into the next repetition.
-    for (const g of grains) g.time = ((g.time % seconds) + seconds) % seconds;
-    grains.sort((a, b) => a.time - b.time);
-    const poses: LoopPose[] = [];
-    const addPose = (time: number) => {
-      const p = flight ? flight.poseAt(time) : listenerPose || view.homePose();
-      const pose = { pos: p.pos.slice(), fwd: p.fwd.slice(), up: p.up.slice() };
-      poses.push({ time, pose, tones: stack.plates.map((plate) => off.distanceTone(plate, pose)) });
-    };
-    addPose(0);
-    if (flight?.moving) {
-      for (let t = 0.05; t < seconds; t += 0.05) addPose(t);
-      const last = Math.max(0, seconds - 1 / 192000);
-      if (last > poses[poses.length - 1].time) addPose(last);
-    }
-    return { seconds, grains, poses };
+  /** Freeze the score before any await; cursors resolve bounded scheduling
+   *  windows from that snapshot instead of retaining every future grain. */
+  captureLoop(this: { bpm: number; rollSeed: number; panModel: PanningModelType; fxOn: boolean },
+    { seconds, beats = null, bpm = this.bpm, seed = this.rollSeed,
+      startBeat = 0, motions = null, flight = null, listenerPose = null, clock = null }: RenderOpts): LoopPlan {
+    return captureLoopScore({ seconds, beats, bpm, seed, startBeat, motions, flight, listenerPose, clock,
+      panModel: this.panModel, fxOn: this.fxOn }, (score, onFire) => {
+      const off: Engine = Object.create(engine);
+      off.offline = true;
+      off.bpm = score.bpm;
+      off.clock = score.clock;
+      off.motions = score.motions;
+      off.flightRender = score.flight;
+      off.sensorCursor = null;
+      off.onlyPlate = score.plates[0] || null;
+      off.rollSeed = score.seed;
+      off.panModel = score.panModel;
+      off.fxOn = score.fxOn;
+      off.plates = () => score.plates;
+      off.restAt = score.restAt;
+      off.plateX = score.plateX;
+      off.soundPool = score.soundPool;
+      off.fire = onFire;
+      return off;
+    });
   },
 
   /** AS PLAYED runs once with a tail. LOOP repeats the captured events through
@@ -832,7 +836,7 @@ export const engine = {
     buildGraph(ctx: BaseAudioContext): Graph; captureLoop(opts: RenderOpts): LoopPlan },
     { seconds, beats = null, bpm = this.bpm, tail = 4, onlyPlate = null,
     seed = this.rollSeed, sampleRate = 48000, trace = false, startBeat = 0,
-    motions = null, flight = null, listenerPose = null, clock = null, onProgress = null,
+    motions = null, flight = null, listenerPose = null, clock = null, throwClock = null, onProgress = null,
     loop = false, loopPlan = null, mix = null }: RenderOpts): Promise<RenderedBuffer> {
     const mx = mix ?? { master: this.masterLevel, space: this.spaceLevel, fxWet: this.fxWet, levels: stack.plates.map((p) => p.level) };
     const offClock = clock || [{ t0: 0, b0: startBeat, bps: bpm / 60 }];
@@ -843,16 +847,14 @@ export const engine = {
       seconds = tmp.timeAtBeat(startBeat + beats);
     }
     const frames = Math.round(seconds! * sampleRate), period = frames / sampleRate;
-    const grains = lp ? (onlyPlate ? lp.grains.filter((g) => g.plate === onlyPlate) : lp.grains) : [];
     let warmSeconds = 0;
     if (lp) {
-      let longest = 0;
-      for (const g of grains) longest = Math.max(longest, g.dur);
+      const { maxDuration, hasThrow } = lp.metadataFor(onlyPlate);
       // Bound residual state below -140 dB without allocating whole extra
       // periods for long exports (128 bars at 30 BPM is already 1024 seconds).
-      const throws = mx.fxWet > 0 && grains.some((g) => g.throw);
+      const throws = mx.fxWet > 0 && hasThrow;
       const echoes = throws ? Math.ceil(Math.log(1e-7) / Math.log(DELAY_FEEDBACK)) * 0.75 * 60 / bpm : 0;
-      warmSeconds = longest + echoes + (mx.space > 0 ? REVERB_SECONDS : 0) + COMP_RELEASE * Math.log(1e7);
+      warmSeconds = maxDuration + echoes + (mx.space > 0 ? REVERB_SECONDS : 0) + COMP_RELEASE * Math.log(1e7);
     }
     const warmFrames = Math.ceil(warmSeconds * sampleRate), warm = warmFrames / sampleRate;
     // Choke and compressor lookahead must see the restarted grains after the crop.
@@ -868,21 +870,44 @@ export const engine = {
     off.spaceLevel = mx.space;
     off.fxWet = mx.fxWet;
     Object.assign(off, this.buildGraph.call(off, octx));
+    if (!lp) {
+      const timeline: ThrowSeg[] = throwClock?.length ? throwClock : offClock.map((seg) => ({ t0: seg.t0, seconds: 0.75 / seg.bps }));
+      let value = timeline[0].value ?? timeline[0].seconds;
+      let target = timeline[0].seconds, previous = timeline[0].t0;
+      let i = 1;
+      // A tempo control can happen during PLAY's startDelay. Advance its
+      // exponential analytically to bar 1 rather than scheduling negative times.
+      for (; i < timeline.length && timeline[i].t0 < 0; i++) {
+        const seg = timeline[i];
+        value = target + (value - target) * Math.exp(-(seg.t0 - previous) / 0.05);
+        target = seg.seconds;
+        previous = seg.t0;
+      }
+      value = target + (value - target) * Math.exp(-Math.max(0, -previous) / 0.05);
+      off.delay.delayTime.setValueAtTime(value, 0);
+      if (value !== target) off.delay.delayTime.setTargetAtTime(target, 0, 0.05);
+      for (; i < timeline.length; i++) {
+        const seg = timeline[i];
+        off.delay.delayTime.setTargetAtTime(seg.seconds, Math.max(0, seg.t0), 0.05);
+      }
+    }
     off.clock = offClock;
     off.motions = motions || new Map(stack.plates.map((p): [Plate, MotionSeg[]] => [p, [{ b0: 0, phi0: p.phase0, w: p.omega() }]]));
     off.flightRender = flight;
+    if (flight) off.plateX = flight.plateX;
     off.sensorCursor = null;
     off.active = new Set();
     off.voices = 0;
     off.events = [];
     off.pending = [];
     off.chokeVoices = new Map();
+    off.offlineVoices = [];
     off.stats = { triggers: 0, dropped: 0, scheduled: 0 };
     off.rollSeed = seed >>> 0;
     off.onlyPlate = onlyPlate;
     off.trace = trace ? [] : null;
     stack.plates.forEach((_, i) => { off.buses[i].level.gain.value = mx.levels[i]; });
-    const setPose = (pose: Pose, t: number, ramp: boolean, tones?: number[]) => {
+    const setPose = (pose: Pose, t: number, ramp: boolean, tones?: number[], before = false) => {
       const L = octx.listener;
       if (L.positionX) {
         const set = (param: AudioParam, v: number) => ramp ? param.linearRampToValueAtTime(v, t) : param.setValueAtTime(v, t);
@@ -891,7 +916,7 @@ export const engine = {
         set(L.upX, pose.up[0]); set(L.upY, pose.up[1]); set(L.upZ, pose.up[2]);
       } else if (t === 0) off.setListener(octx, pose, false);
       stack.plates.forEach((p, i) => {
-        const f = tones ? tones[i] : off.distanceTone(p, pose), param = off.buses[i].tone.frequency;
+        const f = tones ? tones[i] : off.distanceTone(p, pose, t, before), param = off.buses[i].tone.frequency;
         if (ramp) param.linearRampToValueAtTime(f, t); else param.setValueAtTime(f, t);
       });
     };
@@ -906,22 +931,42 @@ export const engine = {
         }
       }
     } else if (flight) {
-      for (let t = 0; t <= total + 1e-9; t += 0.05) {
-        setPose(flight.poseAt(t), t, t > 0);
-        if (!flight.moving) break;
+      const boundaries = [...(flight.knotsIn?.(0, total) ?? []), ...(flight.listenerKnotsIn?.(0, total) ?? [])];
+      const times = new Set<number>([0, ...boundaries]);
+      if (flight.moving) {
+        for (let t = 0.05; t < total; t += 0.05) times.add(t);
+        times.add(total);
+      }
+      const transitions = new Set(boundaries);
+      for (const t of [...times].sort((a, b) => a - b)) {
+        if (t > 0 && transitions.has(t)) {
+          // Preserve the left-hand path up to the boundary, then install the
+          // new interval without interpolating through an instantaneous landing.
+          setPose(flight.poseAt(t, true), t, true, undefined, true);
+          setPose(flight.poseAt(t), t, false);
+        } else setPose(flight.poseAt(t), t, t > 0);
       }
     } else setPose(listenerPose || view.homePose(), 0, false);
 
     const B1 = off.beatAt(seconds!), chunk = 0.1 * bpm / 60;
-    let k = 0, cycle = Math.floor(-warm / period), index = 0, loopTriggers = 0;
+    let k = 0, cycle = Math.floor(-warm / period), loopTriggers = 0;
+    let cursor = lp?.createCursor(onlyPlate, Math.max(0, (-warm - cycle * period) / period * lp.seconds));
+    let nextGrain = cursor?.next() ?? null;
+    let emptyPeriod = false;
     const scheduleUntil = (time: number) => {
       if (lp) {
-        if (!grains.length) return;
+        if (emptyPeriod) return;
         for (;;) {
-          const g = grains[index], at = warm + cycle * period + g.time / lp.seconds * period;
+          if (!nextGrain) {
+            cycle++;
+            cursor = lp.createCursor(onlyPlate);
+            nextGrain = cursor.next();
+            if (!nextGrain) { emptyPeriod = true; break; }
+          }
+          const g = nextGrain, at = warm + cycle * period + g.time / lp.seconds * period;
           if (at >= time) break;
           if (at >= 0 && off.scheduleGrain(g, at) && at >= warm && at < warm + period) loopTriggers++;
-          if (++index === grains.length) { index = 0; cycle++; }
+          nextGrain = cursor!.next();
         }
       } else {
         const lim = Math.min(off.beatAt(time), B1);
@@ -935,17 +980,19 @@ export const engine = {
     };
     const AHEAD = 1.5, STEP = 1, quantum = 128 / sampleRate;
     scheduleUntil(Math.min(AHEAD, total));
-    const schedulingEnd = lp ? total : seconds!;
-    for (let s = STEP; s < schedulingEnd; s += STEP) {
+    for (let s = STEP; s < total; s += STEP) {
       const at = Math.ceil(s / quantum) * quantum;
       if (at >= total) break;
       octx.suspend(at).then(() => {
+        off.retireOfflineVoices(at);
         scheduleUntil(Math.min(at + AHEAD, total));
         if (onProgress) onProgress(at / total);
         octx.resume();
       });
     }
-    const rendered = await octx.startRendering();
+    let rendered: AudioBuffer;
+    try { rendered = await octx.startRendering(); }
+    finally { off.retireOfflineVoices(Infinity); }
     let buf: RenderedBuffer = rendered;
     if (lp) {
       buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate });
@@ -972,7 +1019,7 @@ export const engine = {
     const proc = ctx.createScriptProcessor(4096, 2, 2);
     const mute = ctx.createGain();
     mute.gain.value = 0;
-    const chunks: Float32Array<ArrayBuffer>[] = [];
+    const chunks: Float32Array<ArrayBuffer>[][] = [[], []];
     let frames = 0, done = false;
     const max = Math.floor(maxSeconds * ctx.sampleRate);
     const finish = () => {
@@ -980,21 +1027,29 @@ export const engine = {
       done = true;
       try { node.disconnect(proc); } catch (e) { /* ignore */ }
       proc.disconnect(); mute.disconnect();
-      const out = new Float32Array(frames);
-      let o = 0;
-      for (const ch of chunks) { out.set(ch.subarray(0, Math.min(ch.length, frames - o)), o); o += ch.length; if (o >= frames) break; }
-      const buf = ctx.createBuffer(1, Math.max(1, frames), ctx.sampleRate);
-      buf.copyToChannel(out, 0);
+      proc.onaudioprocess = null;
+      const buf = ctx.createBuffer(2, Math.max(1, frames), ctx.sampleRate);
+      for (let c = 0; c < chunks.length; c++) {
+        const out = buf.getChannelData(c);
+        let o = 0;
+        for (const chunk of chunks[c]) {
+          const count = Math.min(chunk.length, frames - o);
+          out.set(chunk.subarray(0, count), o);
+          o += count;
+          if (o >= frames) break;
+        }
+        chunks[c].length = 0;
+      }
       onDone(buf);
     };
     proc.onaudioprocess = (e) => {
       if (done) return;
-      const l = e.inputBuffer.getChannelData(0), r = e.inputBuffer.getChannelData(1);
-      const m = new Float32Array(l.length);
-      for (let i = 0; i < l.length; i++) m[i] = 0.5 * (l[i] + r[i]);
-      chunks.push(m);
-      frames += m.length;
-      if (frames >= max) { frames = max; finish(); }
+      const count = Math.min(e.inputBuffer.length, max - frames);
+      for (let c = 0; c < chunks.length; c++) {
+        chunks[c].push(e.inputBuffer.getChannelData(c).slice(0, count));
+      }
+      frames += count;
+      if (frames >= max) finish();
     };
     node.connect(proc);
     proc.connect(mute).connect(ctx.destination);

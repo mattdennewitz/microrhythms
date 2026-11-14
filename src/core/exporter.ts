@@ -1,6 +1,7 @@
 /* Export: offline-rendered WAV of the mix, or a ZIP of per-plate stems. */
 import { stack, type Plate } from './stack';
-import { engine, type ClockSeg, type LoopPlan, type MixSnapshot } from './engine';
+import { engine, type ClockSeg, type MixSnapshot, type ThrowSeg } from './engine';
+import type { LoopPlan } from './loop-score';
 import { flight, type ExportFlightCtx } from './flight';
 import { view } from './view';
 import type { MotionSeg, Pose } from './types';
@@ -17,9 +18,11 @@ export interface ExportPlan {
   beats: number;
   mode: ExportMode;
   startBeat: number;
+  seed: number;
   motions: Map<Plate, MotionSeg[]> | null;
   flight: ExportFlightCtx | null;
   clock: ClockSeg[];
+  throwClock: ThrowSeg[] | null;
   listenerPose: Pose | null;
   loopPlan: LoopPlan | null;
   mix: MixSnapshot;
@@ -124,7 +127,8 @@ export const exporter = {
   },
 
   /** Capture once: LOOP starts at the audible/displayed plate phase and current
-   *  listener/ship; AS PLAYED retains motion, tempo and flight history from PLAY. */
+   *  listener/ship; AS PLAYED retains motion, tempo and flight history from PLAY.
+   *  Both modes share the click-time chance seed across the mix and every stem. */
   plan(): ExportPlan {
     const E = engine, S = stack;
     const bpm = E.bpm, bars = this.phrases * S.phraseBars, beats = bars * 4, mode = this.mode;
@@ -143,16 +147,19 @@ export const exporter = {
         return [p, [{ b0: 0, phi0: seg.phi0 + seg.w * (currentBeat - seg.b0), w: seg.w }]];
       }))
       : playing ? new Map<Plate, MotionSeg[]>(S.plates.map((p) => [p, p.motion.map((m) => Object.assign({}, m))])) : null;
-    const fl = flight.on ? flight.exportCtx(mode) : null;
+    // Landing does not erase the flight intervals already recorded during PLAY.
+    const fl = flight.on || (mode === 'tail' && playing) ? flight.exportCtx(mode) : null;
     // Only AS PLAYED replays the tempo map since PLAY (offline time 0 = bar 1).
     let clock: ClockSeg[] = [{ t0: 0, b0: 0, bps: bpm / 60 }];
+    let throwClock: ThrowSeg[] | null = null;
     if (mode === 'tail' && playing) {
       const t0 = E.timeAtBeat(0);
       clock = E.clock.map((s: ClockSeg) => ({ t0: s.t0 - t0, b0: s.b0, bps: s.bps }));
       clock[0] = { t0: 0, b0: 0, bps: clock[0].bps };
+      throwClock = E.throwClock.map((s: ThrowSeg) => ({ ...s, t0: s.t0 - t0 }));
     }
     const listenerPose = fl ? null : E.listenerPose(view);
-    const plan: ExportPlan = { bpm, bars, beats, mode, startBeat, motions, flight: fl, clock,
+    const plan: ExportPlan = { bpm, bars, beats, mode, startBeat, seed: E.rollSeed, motions, flight: fl, clock, throwClock,
       listenerPose: listenerPose && { pos: listenerPose.pos.slice(), fwd: listenerPose.fwd.slice(), up: listenerPose.up.slice() },
       loopPlan: null, mix: { master: E.masterLevel, space: E.spaceLevel, fxWet: E.fxWet, levels: S.plates.map((p) => p.level) } };
     if (mode === 'loop') plan.loopPlan = E.captureLoop(plan);
@@ -192,7 +199,7 @@ export const exporter = {
       const anySolo = stack.anySolo();
       const plates = stack.plates.filter((p) => p.audible(anySolo));
       const files: ZipEntry[] = [];
-      const plan = this.plan(); // shared timing and mix settings for every soloed stem
+      const plan = this.plan(); // shared timing, chance, flight and mix settings for every soloed stem
       for (let i = 0; i < plates.length; i++) {
         if (onProgress) onProgress(i, plates.length, plates[i].name, 0);
         const buf = await this.render(plates[i], plan, onProgress ? (f: number) => onProgress(i, plates.length, plates[i].name, f) : null);

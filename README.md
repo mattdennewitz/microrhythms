@@ -60,6 +60,10 @@ Inspired by the phrase tooling in [phrz](https://nokbeats.com/tools/phrz), adapt
   toggles choose what's drawn, and alt-click a chip to cycle its FX. Ratchets show as
   split bars, reverse as hollow outlines, throws with an echo dot.
 
+  Tagged THROW is a **pre-fader** send: plate **LEVEL** controls the dry signal and
+  ordinary **SPACE** send, not the tagged delay. **THROW WET** controls that delay,
+  which can remain audible even at LEVEL 0.
+
 ## Flight
 
 Press **F** (or **✈ FLY**) to pilot a ship through the plates as if they were asteroid
@@ -119,20 +123,25 @@ pose for the loop: manual or autopilot, playing or stopped. Fly somewhere else a
 the next export captures that new place; it does not replay or continue a flight path.
 
 LOOP's length is exactly the selected bar count at the captured BPM, rounded to the
-nearest audio frame, regardless of earlier playback tempos. The window's chance
-rolls and grain/source/FX choices are captured once and repeated through one
-continuous, warmed audio graph. Grains, CHOKE, reverb, delay and dynamics therefore
+nearest audio frame, regardless of earlier playback tempos. A compact snapshot
+freezes the score, sources, chance rolls and FX choices at the click; events are
+generated in bounded scheduling windows rather than retained as one full-length
+grain list. The same captured musical window repeats through one continuous,
+warmed audio graph. Grains, CHOKE, reverb, delay and dynamics therefore
 carry across the loop boundary; the export is not a one-shot with its processed
 tail added onto the beginning. LOOP repeats this local window even when plate
 cycles do not divide its bar count. Fractional BPM is preserved in LOOP filenames;
 `from1` means local output bar 1, not PLAY's original bar 1.
 
 **AS PLAYED** (default) renders the performance from **PLAY's bar 1**, preserving
-recorded tempo changes and plate/flight motion history while playing. When stopped
-it follows the next PLAY at the current project BPM. It appends four seconds of
-reverb/delay tail and is not an exact-length loop. Chance rolls are deterministic
-per beat. In flight, both modes include sensor hits and proximity mix, but only
-AS PLAYED follows the performance's flight path.
+recorded tempo changes (including tempo-synced THROW), plate motion and flight
+history while playing. Flight replay preserves the historical listener look
+direction and flight-on/off intervals: landing does not erase earlier flight, and
+taking off does not turn earlier grounded bars into flight. When stopped it follows
+the next PLAY at the current project BPM. It appends four seconds of reverb/delay
+tail and is not an exact-length loop. Chance rolls are deterministic per beat.
+In flight, both modes include sensor hits and proximity mix, but only AS PLAYED
+follows the performance's flight path.
 
 Stopping playback freezes the displayed plate positions without a latency jump,
 stops manual-flight inertia and clears held flight keys. Manual lookahead accounts
@@ -140,12 +149,15 @@ for thrust and damping. Flight replay retains the beginning needed by the maximu
 AS PLAYED export (512 beats plus up to 16 beats of tail), rather than discarding it
 during long sessions.
 
-**STEMS .ZIP** renders one WAV per audible plate. BPM, bar count, mode, master,
-space, throw wet and plate levels are captured once for the mix or all its stems;
-changes apply to the next export. LOOP also captures its events, plate motion,
-ship/listener pose and flight parameters. AS PLAYED does not freeze sound buffers
-or pattern edits made mid-export. Each stem keeps its own master dynamics, like
-soloing that plate, so summed stems need not null against the mix.
+**STEMS .ZIP** renders one WAV per audible plate. BPM, bar count, mode, chance seed,
+master, space, throw wet and plate levels are captured once for the mix or all its
+stems; changes apply to the next export. LOOP also freezes its score, source/FX
+choices, plate motion, ship/listener pose and flight parameters. AS PLAYED copies
+its recorded flight replay at the click, so later flight restarts, landings or
+project loads cannot change that replay or its chance seed between stems.
+AS PLAYED does not freeze sound buffers or pattern edits made mid-export.
+Each stem keeps its own master dynamics, like soloing that plate, so summed stems
+need not null against the mix.
 
 Mixes and stems are 24-bit / 48 kHz; tempo is stored in projects and filenames,
 not a WAV tempo field. Progress distinguishes rendering from encoding. Stem ZIP
@@ -157,7 +169,11 @@ member names use UTF-8, and completed exports are not retained by the exporter.
 plate (patterns, edits, FX, holds), the keep slots, flight settings and the ship's
 position, the chance seed (so a reopened project exports the same hits) and your own
 sounds, embedded as 16-bit audio. **⤒ OPEN .JSON** replaces the current machine with a
-saved one (playback stops; undo history starts fresh).
+saved one (playback stops; undo history starts fresh). Project files and shared links
+reset stopped plates to their deterministic, generated starting phases and fresh
+motion, rather than inheriting the outgoing machine's frozen positions. The stopped
+playhead position and earlier PLAY performance are not restored. Replacement also
+cancels pending sound imports and captures from the outgoing project.
 
 **SHARE** copies a self-contained URL that restores the same project state,
 including patterns and edits, keep slots, custom sounds (the same 16-bit PCM as
@@ -206,11 +222,15 @@ denied, copy the address-bar URL after it updates.
 ## Your own sounds
 
 - **＋ ADD SOUNDS** or drop audio files anywhere (wav/mp3/ogg/flac/m4a/aif).
-  Files are mono-ised, silence-trimmed, normalised and capped at 90 s. If stereo
-  channels substantially cancel, the loudest channel is used instead. Longer
-  imports keep the first 90 s and the import notice says **first 90 s used**.
+  Files are DC-corrected, mono-ised, silence-trimmed, normalised and capped at 90 s.
+  Cancellation is checked after removing each channel's DC offset: if stereo
+  channels substantially cancel, the loudest audible channel is used instead,
+  including opposite-phase stereo with a common DC offset. Longer imports keep
+  the first 90 s and the import notice says **first 90 s used**.
 - **● REC MIC** records up to 20 s from the microphone.
 - **⟲ RESAMPLE 4s** captures the machine's own output as a new source.
+  Mic and resample capture preserve available stereo channels until this same
+  conditioning step, so anti-phase material is not averaged away first.
 - **CLEAR ALL** removes all imported/recorded/resampled sounds and turns every
   **BUILT-IN** off in one click, without changing patterns or layer settings.
   Clearing cancels pending sound additions and stops captures; you can add new
@@ -227,8 +247,12 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
 
 - Drag to orbit, wheel to zoom, double-click to reset the view.
 - Click a plate to select it; **shift-click** a cell to add or remove a chip.
+  Displaced chips are targeted at their visible bodies, including micro-timing and
+  swing offsets; near-clipped invisible discs do not intercept those clicks.
 - The level meters (bottom left) each have an **M** toggle: click to mute that plate,
   shift-click to solo it. Click the level itself to select the plate.
+  This also selects discs hidden by overlap at tight spacing; the layer controls
+  and keyboard cell editor remain available.
 - On touchscreens, drag with one finger to orbit (or look in flight); pinch with two
   fingers to magnify the page and pinch back out to recover. Pinching cancels camera
   dragging rather than moving the view. Rapid mute/control taps do not zoom the page.
@@ -237,7 +261,15 @@ sounds each plate pulls from, toggle sounds globally in the list, or switch
   leave the app. Flight holds release on lift, cancellation or leaving the app;
   separate fingers can hold thrust and brake independently.
 - Hover a chip to see which fragment it holds (sound, offset, length, rate).
-- **ORBIT / SPLIT** (`S`) changes separation; **AUTO-ORBIT** (`O`) drifts the camera.
+- **SPACING** in Transport adjusts disc distances from 30–240% (double-click resets
+  to 125%). This is world spacing, not just a visual effect: it changes spatial-audio
+  positions, listener distance and flight distances. The default framing pulls back
+  as the stack expands; wheel zoom remains available. Spacing is saved in project
+  files and shared URLs.
+- **ORBIT / SPLIT** (`S`) changes camera framing without resetting spacing;
+  **AUTO-ORBIT** (`O`) drifts the camera.
+  Framing follows the visible panel layout: a bottom panel on narrow screens, a
+  side panel on wider screens.
 - **EAR: CAMERA** makes the listener ride the camera, so orbiting moves the sound
   field; **EAR: FIXED** keeps it at the home view.
 - **EVOLVE** applies a small generative change each bar; **REGENERATE** re-rolls

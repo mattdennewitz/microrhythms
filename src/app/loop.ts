@@ -18,6 +18,7 @@ export function startLoop(canvas: HTMLCanvasElement) {
     if (flight.on) flight.update(tv);
     V.updateCamera(now / 1000);
     E.updateSpace(V);
+    if (E.playing) flight.recordSample(E.ctx!.currentTime, E.listenerPose(V));
     E.readMeters();
     const d0 = performance.now();
     V.draw(tv, E.playing, now / 1000);

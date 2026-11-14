@@ -80,7 +80,6 @@ export const app = {
 
   toggleMode() {
     view.mode = view.mode === 'ORBIT' ? 'SPLIT' : 'ORBIT';
-    view.sepTarget = view.mode === 'SPLIT' ? 1.85 : 1.25;
     notify();
   },
 
@@ -415,8 +414,8 @@ export const app = {
     const on = !sounds.list.some((s) => s.builtin && s.enabled);
     sounds.setAllBuiltins(on);
   },
-  clearSounds() {
-    sounds.clearAll();
+  /** Call after invalidating sounds.generation; cancellation must not clear the replacement library. */
+  cancelSoundWork() {
     const rec = this.rec, resampleCapture = this.resampleCapture;
     this.rec = null;
     this.resampleCapture = null;
@@ -427,6 +426,10 @@ export const app = {
     this.importsPending = 0;
     rec?.stop();
     resampleCapture?.stop();
+  },
+  clearSounds() {
+    sounds.clearAll();
+    this.cancelSoundWork();
     this.toast('samples cleared · built-ins off');
     this.announce('All added sounds removed. Built-in sounds turned off.');
   },

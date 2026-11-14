@@ -26,11 +26,11 @@ export interface ApAnchor { t0: number; tau0: number; speed: number }
 /** Ease-in from where the ship was when the autopilot engaged. */
 export interface Blend { from: number[]; t0: number; dur: number }
 /** One entry of the flight history since PLAY. */
-export interface HistSeg { t0: number; mode: FlightMode; ap: ApAnchor; blend: Blend | null }
-/** A manual flight sample (listener orientation). */
-export interface TrackSample { t: number; pos: number[]; fwd: number[]; up: number[] }
+export interface HistSeg { t0: number; listenerT0: number; active: boolean; mode: FlightMode; ap: ApAnchor; blend: Blend | null; pose: Pose }
+/** The actual listener pose, in either flight mode or while landed. */
+export interface TrackSample extends Pose { t: number }
 /** A point of the ship path the scheduler used (also the engine's window cursor). */
-export interface Knot { t: number; pos: number[] }
+export interface Knot { t: number; pos: number[]; interval?: number }
 export type SensorCursor = Knot;
 /** Live: the ship path over the window being scheduled (linear between its ends). */
 export interface ShipWindow { ta: number; tb: number; posA: number[]; posB: number[] }
@@ -50,7 +50,8 @@ export interface NearInfo {
 }
 /** Flight parameters the engine schedules with: the live ship or an export's frozen copy. */
 export interface FlightCtx {
-  shipAt: (t: number) => number[];
+  /** Right-continuous path; before requests the left limit at a transition. */
+  shipAt: (t: number, before?: boolean) => number[];
   headMix: number;
   falloff: number;
   R: number;
@@ -58,11 +59,18 @@ export interface FlightCtx {
   useChance: boolean;
   /** Corners of a recorded path inside (a, b), in the context's time. */
   knotsIn?: (a: number, b: number) => number[];
+  /** Whether flight treatment applies at this time (AS PLAYED may include landings). */
+  activeAt?: (t: number, before?: boolean) => boolean;
+  /** Listener treatment changes at the actual control time, not the sensor horizon. */
+  listenerActiveAt?: (t: number, before?: boolean) => boolean;
+  listenerKnotsIn?: (a: number, b: number) => number[];
 }
 /** A frozen copy of the flight for an export (see exportCtx). */
 export interface ExportFlightCtx extends FlightCtx {
   moving: boolean;
-  poseAt: (tOff: number) => Pose;
+  poseAt: (tOff: number, before?: boolean) => Pose;
+  /** Click-time plate geometry, shared by sensors, source panners and proximity. */
+  plateX: (p: Plate) => number;
   where: string;
   liveT?: (tOff: number) => number;
 }
@@ -78,6 +86,9 @@ export interface FlightEngine {
   onlyPlate: Plate | null;
   timeAtBeat(B: number): number;
   beatAt(t: number): number;
+  plates?: () => Plate[];
+  restAt?: (p: Plate, B: number) => boolean;
+  plateX?: (p: Plate) => number;
   fire(p: Plate, c: Chip, t: number, headAngle: number, B: number, gainMul?: number,
     extra?: { sensor: boolean; dist: number } | null): void;
 }
@@ -90,6 +101,16 @@ const wrapPi = (a: number) => a - TAU * Math.round(a / TAU);
 const norm = (a: number[]) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const lerp3 = (a: number[], b: number[], f: number) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+const copyPose = (p: Pose): Pose => ({ pos: p.pos.slice(), fwd: p.fwd.slice(), up: p.up.slice() });
+
+/** Exact constant-input solution of v' = a - k v, p' = v. */
+function advance(pos: number[], vel: number[], a: number[], k: number, dt: number): { pos: number[]; vel: number[] } {
+  const damp = Math.exp(-k * dt), integral = -Math.expm1(-k * dt) / k;
+  return {
+    pos: pos.map((p, i) => p + a[i] / k * dt + (vel[i] - a[i] / k) * integral),
+    vel: vel.map((v, i) => a[i] / k + (v - a[i] / k) * damp),
+  };
+}
 
 export const flight = {
   on: false,
@@ -108,7 +129,7 @@ export const flight = {
   keys: new Set<string>(),
   saved: null as FlightState | null, // flight state at the last landing (resumed on take-off)
   hist: [] as HistSeg[],        // since PLAY: [{t0, mode:'auto'|'manual', ap, blend}]
-  track: [] as TrackSample[],   // since PLAY, manual flight samples [{t, pos, fwd, up}] (listener orientation)
+  track: [] as TrackSample[],   // since PLAY: actual auto/manual/landed listener poses
   knots: [] as Knot[],          // since PLAY, the ship path the scheduler used [{t, pos}] (piecewise linear)
   tNow: 0,                      // clock time of the last update
   ap: { t0: 0, tau0: 0, speed: 1 } as ApAnchor,
@@ -164,37 +185,57 @@ export const flight = {
     const s = f * f * (3 - 2 * f);
     return lerp3(b.from, raw, s);
   },
-  /** Autopilot position under a recorded anchor (for replaying the flight). */
-  apPosWith(seg: HistSeg, t: number): number[] {
-    return this.ease(this.pathAtTau(seg.ap.tau0 + seg.ap.speed * (t - seg.ap.t0)), seg.blend, t);
+  /** Capture the autopilot geometry, not the mutable stack/view used by live flight. */
+  capturePath(): (tau: number) => number[] {
+    const ps = stack.plates.map((p) => ({ x: view.plateX(p), mid: (p.rIn + p.rOut) / 2, half: (p.rOut - p.rIn) / 2 }))
+      .sort((a, b) => a.x - b.x);
+    const x0 = ps[0].x - 0.7, x1 = ps[ps.length - 1].x + 0.5;
+    const period = this.PERIOD, head = stack.HEAD;
+    return (tau: number) => {
+      const x = lerp(x0, x1, 0.5 - 0.5 * Math.cos(TAU * tau / period));
+      let lane = ps[ps.length - 1];
+      if (x <= ps[0].x) lane = ps[0];
+      else for (let i = 1; i < ps.length; i++) if (x <= ps[i].x) {
+        const f = 0.5 - 0.5 * Math.cos(Math.PI * (x - ps[i - 1].x) / (ps[i].x - ps[i - 1].x));
+        lane = { x, mid: lerp(ps[i - 1].mid, ps[i].mid, f), half: lerp(ps[i - 1].half, ps[i].half, f) };
+        break;
+      }
+      const r = lane.mid + lane.half * 0.85 * Math.sin(TAU * tau / 23);
+      const th = head + 0.45 + 0.42 * Math.sin(TAU * tau / 41);
+      return [x, r * Math.sin(th), -r * Math.cos(th)];
+    };
   },
 
   // ------------------------------------------------------------ flight history
   histStart(): void {
     const t = this.clock();
-    this.hist = [{ t0: t, mode: this.autopilot ? 'auto' : 'manual', ap: Object.assign({}, this.ap), blend: this.copyBlend() }];
+    this.hist = [this.historyEntry(t)];
     this.track = [];
     this.knots = [];
-    if (!this.autopilot) this.recordSample(t);
+    this.recordSample(t, this.hist[0].pose);
   },
   copyBlend(): Blend | null { return this.blend ? { from: this.blend.from.slice(), t0: this.blend.t0, dur: this.blend.dur } : null; },
+  historyEntry(t0: number, listenerT0 = t0): HistSeg {
+    return { t0, listenerT0, active: this.on, mode: this.autopilot ? 'auto' : 'manual',
+      ap: { ...this.ap }, blend: this.copyBlend(), pose: copyPose(this.on ? this.pose() : engine.listenerPose(view.orbitPose)) };
+  },
   /** Record a change in how the ship flies. Dated at the scheduling horizon: the
    *  live scheduler has already scheduled up to there with the previous mode. */
   histPush(mode: FlightMode): void {
-    if (!this.on || !engine.playing) return;
-    this.hist.push({ t0: engine.horizon(), mode, ap: Object.assign({}, this.ap), blend: this.copyBlend() });
-  },
-  recordSample(t: number): void {
+    if (!engine.playing) return;
+    const t = engine.horizon();
     if (engine.beatAt(t) > REPLAY_BEATS) return;
-    const pose = this.pose();
-    const tr = this.track;
-    if (tr.length && t <= tr[tr.length - 1].t) return;
-    tr.push({ t, pos: this.pos.slice(), fwd: pose.fwd, up: pose.up });
+    const seg = this.historyEntry(t, this.clock());
+    seg.mode = mode;
+    this.hist.push(seg);
   },
-  histAt(t: number): HistSeg {
-    const h = this.hist;
-    for (let i = h.length - 1; i >= 0; i--) if (h[i].t0 <= t) return h[i];
-    return h[0];
+  recordSample(t: number, pose?: Pose): void {
+    if (engine.beatAt(t) > REPLAY_BEATS) return;
+    const tr = this.track;
+    if (tr.length && t < tr[tr.length - 1].t) return;
+    const sample = { t, ...copyPose(pose ?? (this.on ? this.pose() : engine.listenerPose(view.orbitPose))) };
+    if (tr.length && t === tr[tr.length - 1].t) tr[tr.length - 1] = sample;
+    else tr.push(sample);
   },
   /** Live: decide the ship's path over a scheduling window (linear between its ends,
    *  each end predicted once and shared with the neighbouring window) and record it. */
@@ -206,9 +247,9 @@ export const flight = {
     E.shipWin = { ta, tb, posA, posB };
     E.sensorCursor = { t: tb, pos: posB };
     if (Ba <= REPLAY_BEATS) {
-      const k = this.knots;
-      if (!k.length || k[k.length - 1].t < ta - 1e-9) k.push({ t: ta, pos: posA });
-      k.push({ t: tb, pos: posB });
+      const k = this.knots, interval = this.hist.length - 1, last = k[k.length - 1];
+      if (!last || last.t < ta - 1e-9 || last.interval !== interval) k.push({ t: ta, pos: posA, interval });
+      k.push({ t: tb, pos: posB, interval });
     }
   },
   /** Live ship position as the scheduler sees it. */
@@ -219,53 +260,6 @@ export const flight = {
       return lerp3(w.posA, w.posB, clamp(f, 0, 1));
     }
     return this.predict(t);
-  },
-  knotAt(t: number): number[] {
-    const k = this.knots;
-    let lo = 0, hi = k.length - 1;
-    if (t <= k[0].t) return k[0].pos;
-    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (k[mid].t <= t) lo = mid; else hi = mid; }
-    const a = k[lo], b = k[hi], f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
-    return lerp3(a.pos, b.pos, clamp(f, 0, 1));
-  },
-  /** Knot times strictly inside (ta, tb). */
-  knotsIn(ta: number, tb: number): number[] {
-    const k = this.knots, out: number[] = [];
-    if (!k.length) return out;
-    let lo = 0, hi = k.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (k[mid].t <= ta) lo = mid + 1; else hi = mid; }
-    for (let i = lo; i < k.length && k[i].t < tb; i++) out.push(k[i].t);
-    return out;
-  },
-
-  /** Where the ship was at clock time t during this PLAY (future: as predicted). */
-  shipAtPlayed(t: number): number[] {
-    // what the scheduler actually used, while it has been recorded
-    if (this.knots.length && t <= this.knots[this.knots.length - 1].t) return this.knotAt(t);
-    if (!this.hist.length) return this.predict(t);
-    const seg = this.histAt(t);
-    if (seg.mode === 'auto') return this.apPosWith(seg, t);
-    return this.sampleAt(t, seg).pos;
-  },
-  poseAtPlayed(t: number, frameAt: (a: number[], b: number[]) => Pose): Pose {
-    if (!this.hist.length) return frameAt(this.predict(t), this.predict(t + 0.6));
-    const seg = this.histAt(t);
-    if (seg.mode === 'auto') return frameAt(this.apPosWith(seg, t), this.apPosWith(seg, t + 0.6));
-    return this.sampleAt(t, seg);
-  },
-  sampleAt(t: number, seg: HistSeg): Pose {
-    const tr = this.track;
-    const isLast = seg === this.hist[this.hist.length - 1];
-    if (!tr.length || t >= tr[tr.length - 1].t) {
-      const last = tr[tr.length - 1];
-      if (isLast && !this.autopilot) { const pose = this.pose(); return { pos: this.predict(t), fwd: pose.fwd, up: pose.up }; }
-      return last ? { pos: last.pos, fwd: last.fwd, up: last.up } : { pos: this.pos.slice(), fwd: this.pose().fwd, up: this.pose().up };
-    }
-    if (t <= tr[0].t) return { pos: tr[0].pos, fwd: tr[0].fwd, up: tr[0].up };
-    let lo = 0, hi = tr.length - 1;
-    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (tr[mid].t <= t) lo = mid; else hi = mid; }
-    const a = tr[lo], b = tr[hi], f = (t - a.t) / (b.t - a.t);
-    return { pos: lerp3(a.pos, b.pos, f), fwd: a.fwd, up: a.up };
   },
   pathPos(t: number): number[] { return this.pathAtTau(this.tau(t)); },
   pathAtTau(tau: number): number[] {
@@ -296,11 +290,10 @@ export const flight = {
   /** Ship position at clock time t (exact on autopilot, extrapolated by hand). */
   predict(t: number): number[] {
     if (this.autopilot) return this.apPos(t);
-    const dt = clamp(t - this.tNow, -0.5, 0.5);
+    const dt = Math.max(-0.5, t - this.tNow);
     if (dt <= 0) return [this.pos[0] + this.vel[0] * dt, this.pos[1] + this.vel[1] * dt, this.pos[2] + this.vel[2] * dt];
     const { a, k } = this.manualAccel();
-    const decay = (1 - Math.exp(-k * dt)) / k;
-    return this.pos.map((p, i) => p + (a[i] / k) * dt + (this.vel[i] - a[i] / k) * decay);
+    return advance(this.pos, this.vel, a, k, dt).pos;
   },
 
   // ------------------------------------------------------------ control
@@ -332,7 +325,8 @@ export const flight = {
       this.pos = this.apPos(t); // on the path immediately, not at the default spot until the next frame
       this.fwdSmooth = this.pathHeading(t);
     }
-    if (engine.playing) this.histStart(); // taking off mid-play: record from here
+    this.tNow = t;
+    if (engine.playing) this.histPush(this.autopilot ? 'auto' : 'manual');
   },
   /** Everything needed to pick the flight up again later (also saved in projects). */
   flightState(): FlightState {
@@ -350,6 +344,7 @@ export const flight = {
   exit(): void {
     if (this.on) this.saved = this.flightState(); // land: remember where we were
     this.on = false; this.keys.clear(); this.cursor = null;
+    if (engine.playing) this.histPush(this.autopilot ? 'auto' : 'manual');
   },
 
   /** Take the stick: keep the current pose and velocity. */
@@ -438,7 +433,7 @@ export const flight = {
   update(tv?: number): void {
     const t = this.clock();
     this.lastTau = this.tau(t);
-    const dt = clamp(t - (this.tNow || t), 0, 0.1);
+    const dt = Math.max(0, t - this.tNow);
     this.tNow = t;
     if (this.autopilot) {
       // pose for what is audible now; heading follows the path, smoothed
@@ -448,10 +443,9 @@ export const flight = {
       this.fwdSmooth = norm(lerp3(this.fwdSmooth, n, a));
     } else {
       const { a, k } = this.manualAccel();
-      for (let i = 0; i < 3; i++) this.vel[i] += a[i] * dt;
-      const damp = Math.exp(-k * dt);
-      for (let i = 0; i < 3; i++) { this.vel[i] *= damp; this.pos[i] += this.vel[i] * dt; }
-      if (engine.playing) this.recordSample(t);
+      const next = advance(this.pos, this.vel, a, k, dt);
+      this.pos = next.pos;
+      this.vel = next.vel;
     }
     this.updateNear();
   },
@@ -478,8 +472,7 @@ export const flight = {
 
   /** Gain for a fixed-head grain: 1 / (1 + (d / falloff)²), d = ship → where the
    *  grain sounds. With falloff 0.32: 0.2 u → 0.72, 0.75 u → 0.15, 2 u → 0.025. */
-  proximityAt(s: number[], p: Plate, c: Chip, headAngle: number, falloff: number): number {
-    const X = view.plateX(p);
+  proximityAt(s: number[], p: Plate, c: Chip, headAngle: number, falloff: number, X = view.plateX(p)): number {
     const d = Math.hypot(s[0] - X, s[1] - c.radius * Math.sin(headAngle), s[2] + c.radius * Math.cos(headAngle));
     const q = d / falloff;
     return 1 / (1 + q * q);
@@ -497,18 +490,23 @@ export const flight = {
    *  - Autopilot, stopped: the paused path resumes when PLAY starts the song.
    *  - Autopilot, playing: the path as it has run since this PLAY.
    *  - By hand: the ship where it is (coasting to a stop if still drifting). */
-  exportCtx(mode: 'loop' | 'tail' = 'tail'): ExportFlightCtx {
+  exportCtx(mode: 'loop' | 'tail' = 'tail'): ExportFlightCtx | null {
     const E = engine;
-    const base = { headMix: this.headMix, falloff: this.falloff, R: this.R, sensorGain: this.sensorGain, useChance: this.useChance };
+    const xs = stack.plates.map((p) => view.plateX(p));
+    const base = { headMix: this.headMix, falloff: this.falloff, R: this.R, sensorGain: this.sensorGain,
+      useChance: this.useChance, plateX: (p: Plate) => xs[p.index] };
+    if (!this.on && !(mode === 'tail' && E.playing && this.hist.some((s) => s.active))) return null;
     if (mode === 'loop') {
       const current = this.pose();
       const pose: Pose = { pos: current.pos.slice(), fwd: current.fwd.slice(), up: current.up.slice() };
       return Object.assign(base, { moving: false, shipAt: () => pose.pos, poseAt: () => pose, where: 'at the captured ship position' });
     }
     const lookYaw = this.autopilot ? this.lookYaw : 0, lookPitch = this.autopilot ? this.lookPitch : 0;
+    const fallbackFwd = this.fwdSmooth.slice();
+    const pathAtTau = this.capturePath();
     const frameAt = (a: number[], b: number[]): Pose => {
       let f = [b[0] - a[0], (b[1] - a[1]) * 0.35, b[2] - a[2]];
-      f = Math.hypot(f[0], f[1], f[2]) > 1e-5 ? norm(f) : this.fwdSmooth;
+      f = Math.hypot(f[0], f[1], f[2]) > 1e-5 ? norm(f) : fallbackFwd.slice();
       if (lookYaw || lookPitch) {
         const yaw = Math.atan2(f[2], f[0]) + lookYaw;
         const pitch = clamp(Math.asin(clamp(f[1], -1, 1)) + lookPitch, -1.45, 1.45);
@@ -519,31 +517,130 @@ export const flight = {
       return { pos: a, fwd: f, up: cross(right, f) };
     };
     if (E.playing) {
-      // this PLAY as it was flown: autopilot anchors and hand-flown samples, then the prediction
-      // offline time 0 is bar 1; the export replays the played tempo map, so offline
-      // time maps to live time by a fixed shift
-      const t0 = E.timeAtBeat(0);
+      // No callback below reads flight, engine, view, or a live history array.
+      const hist = this.hist.map((s) => ({ ...s, ap: { ...s.ap },
+        blend: s.blend ? { ...s.blend, from: s.blend.from.slice() } : null, pose: copyPose(s.pose) }));
+      if (!hist.length) hist.push(this.historyEntry(E.timeAtBeat(0)));
+      const track = this.track.map((s) => ({ t: s.t, ...copyPose(s) }));
+      const knots = this.knots.map((k) => ({ ...k, pos: k.pos.slice() }));
+      const t0 = E.timeAtBeat(0), capturedAt = E.ctx!.currentTime;
+      const pos = this.pos.slice(), vel = this.vel.slice(), now = this.tNow;
+      const { a, k } = this.manualAccel();
+      const listenerOn = this.on, listenerAuto = this.autopilot;
+      const listenerSeg = this.historyEntry(capturedAt);
+      const listenerPrevious = this.prevAp ? { ...listenerSeg, ap: { ...this.prevAp } } : null;
+      const listenerDelay = Math.max(0, capturedAt - E.visualTime());
+      // Scheduled lookahead remains authoritative. Continue from its last point,
+      // not a newer input's independently predicted position at the same time.
+      let continuation: Knot | undefined;
+      for (let i = knots.length - 1; i >= 0; i--) {
+        const knot = knots[i];
+        if (knot.t >= capturedAt && knot.t >= hist[hist.length - 1].t0 &&
+          (knot.interval === undefined || knot.interval === hist.length - 1)) {
+          continuation = knot;
+          break;
+        }
+      }
+      const continuationVelocity = continuation
+        ? advance(pos, vel, a, k, Math.max(0, continuation.t - now)).vel : vel;
       const liveT = (tOff: number) => t0 + tOff;
-      const shipAt = (tOff: number) => this.shipAtPlayed(liveT(tOff));
-      const poseAt = (tOff: number) => this.poseAtPlayed(liveT(tOff), frameAt);
-      // the recorded path's corners, in export time, so the export splits windows there too
-      const knotsIn = (a: number, b: number) => this.knotsIn(t0 + a, t0 + b).map((t) => t - t0);
-      return Object.assign(base, { moving: true, shipAt, poseAt, knotsIn, where: 'as flown since PLAY', liveT });
+      const segIndex = (t: number, before = false) => {
+        let lo = 0, hi = hist.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (hist[mid].t0 < t || (!before && hist[mid].t0 === t)) lo = mid + 1; else hi = mid; }
+        return Math.max(0, lo - 1);
+      };
+      const apPos = (s: HistSeg, t: number) => {
+        const raw = pathAtTau(s.ap.tau0 + s.ap.speed * (t - s.ap.t0));
+        if (!s.blend) return raw;
+        const f = clamp((t - s.blend.t0) / s.blend.dur, 0, 1);
+        return lerp3(s.blend.from, raw, f * f * (3 - 2 * f));
+      };
+      const listenerPathAt = (t: number) => apPos(listenerPrevious && t < listenerSeg.ap.t0 ? listenerPrevious : listenerSeg, t);
+      // Listener frames have their own actual clock. A scheduler-only transition
+      // must not rewind them to the pose captured at the earlier control click.
+      const sampledPose = (t: number, before = false): Pose => {
+        let lo = 0, hi = track.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (track[mid].t < t || (!before && track[mid].t === t)) lo = mid + 1; else hi = mid; }
+        const left = track[lo - 1], right = track[lo];
+        if (!left) return copyPose(track[0] ?? hist[0].pose);
+        if (!right) return copyPose(left);
+        const f = (t - left.t) / (right.t - left.t);
+        return { pos: lerp3(left.pos, right.pos, f), fwd: left.fwd.slice(), up: left.up.slice() };
+      };
+      const listenerAtCapture = sampledPose(capturedAt);
+      const listenerPathOrigin = listenerPathAt(capturedAt - listenerDelay);
+      const shipAtLive = (t: number, before = false): number[] => {
+        const si = segIndex(t, before), seg = hist[si], end = hist[si + 1]?.t0 ?? Infinity;
+        if (!seg.active) return sampledPose(t, before).pos;
+        // Only interpolate knots in this interval: never bridge a landing/restart.
+        let lo = 0, hi = knots.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (knots[mid].t < t || (!before && knots[mid].t === t)) lo = mid + 1; else hi = mid; }
+        const left = knots[lo - 1], right = knots[lo];
+        if (left && left.t >= seg.t0 && left.t <= end && (left.interval === undefined || left.interval === si)) {
+          if (left.t === t) return left.pos.slice();
+          if (right && right.t <= end && (right.interval === undefined || right.interval === si)) {
+            return lerp3(left.pos, right.pos, (t - left.t) / (right.t - left.t));
+          }
+        }
+        if (seg.mode === 'auto') return apPos(seg, t);
+        if (si === hist.length - 1 && t > capturedAt) {
+          if (continuation && t >= continuation.t) {
+            return advance(continuation.pos, continuationVelocity, a, k, t - continuation.t).pos;
+          }
+          const dt = Math.max(-0.5, t - now);
+          return dt <= 0 ? pos.map((p, i) => p + vel[i] * dt) : advance(pos, vel, a, k, dt).pos;
+        }
+        return sampledPose(t, before).pos;
+      };
+      const shipAt = (tOff: number, before = false) => shipAtLive(liveT(tOff), before);
+      const poseAt = (tOff: number, before = false): Pose => {
+        const t = liveT(tOff);
+        if (t <= capturedAt) return sampledPose(t, before);
+        const dt = t - capturedAt;
+        if (!listenerOn) return copyPose(listenerAtCapture);
+        if (!listenerAuto) return { ...copyPose(listenerAtCapture), pos: advance(listenerAtCapture.pos, vel, a, k, dt).pos };
+        // The listener follows the audible-time autopilot pose, not sensor knots.
+        // Continue from its last actual target so capture cannot introduce a jump.
+        const pathT = t - listenerDelay, next = listenerPathAt(pathT);
+        const target = frameAt(next, listenerPathAt(pathT + 0.6));
+        const fwd = norm(lerp3(listenerAtCapture.fwd, target.fwd, 1 - Math.exp(-3 * dt)));
+        const up = cross(norm(cross(fwd, [0, 1, 0])), fwd);
+        return { pos: listenerAtCapture.pos.map((p, i) => p + next[i] - listenerPathOrigin[i]), fwd, up };
+      };
+      // Include transitions even where no sensor knots were recorded while landed.
+      const boundaries = [...new Set([...knots.map((k) => k.t), ...hist.map((s) => s.t0)])].sort((a, b) => a - b);
+      const knotsIn = (a: number, b: number) => {
+        let lo = 0, hi = boundaries.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (boundaries[mid] <= t0 + a) lo = mid + 1; else hi = mid; }
+        const out: number[] = [];
+        for (let i = lo; i < boundaries.length && boundaries[i] < t0 + b; i++) out.push(boundaries[i] - t0);
+        return out;
+      };
+      const activeAt = (tOff: number, before = false) => hist[segIndex(liveT(tOff), before)].active;
+      const listenerTimes = [...new Set(hist.map((s) => s.listenerT0))].sort((a, b) => a - b);
+      const listenerKnotsIn = (a: number, b: number) => listenerTimes.filter((t) => t > t0 + a && t < t0 + b).map((t) => t - t0);
+      const listenerActiveAt = (tOff: number, before = false) => {
+        const t = liveT(tOff);
+        let lo = 0, hi = hist.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (hist[mid].listenerT0 < t || (!before && hist[mid].listenerT0 === t)) lo = mid + 1; else hi = mid; }
+        return hist[Math.max(0, lo - 1)].active;
+      };
+      return Object.assign(base, { moving: true, shipAt, poseAt, activeAt, listenerActiveAt, knotsIn, listenerKnotsIn, where: 'as flown since PLAY', liveT });
     }
     if (this.autopilot) {
       let shipAt: (tOff: number) => number[];
       {
         // paused: on PLAY the path restarts from this phase, bar 1 lands startDelay later
         const tau0 = this.ap.tau0, sp = this.ap.speed, d = E.startDelay;
-        shipAt = (tOff: number) => this.pathAtTau(tau0 + sp * (tOff + d));
+        shipAt = (tOff: number) => pathAtTau(tau0 + sp * (tOff + d));
       }
       const poseAt = (tOff: number) => frameAt(shipAt(tOff), shipAt(tOff + 0.6));
       return Object.assign(base, { moving: true, shipAt, poseAt, where: 'along the autopilot path' });
     }
     const pose = this.pose();
     const pos = pose.pos.slice();
-    const vel = E.playing ? [0, 0, 0] : this.vel.slice();
-    const k = 1.4, d = E.playing ? 0 : E.startDelay;
+    const vel = this.vel.slice();
+    const k = 1.4, d = E.startDelay;
     const drifting = Math.hypot(vel[0], vel[1], vel[2]) > 1e-3;
     const shipAt = drifting
       ? (tOff: number) => { const g = (1 - Math.exp(-k * (tOff + d))) / k; return [pos[0] + vel[0] * g, pos[1] + vel[1] * g, pos[2] + vel[2] * g]; }
@@ -591,26 +688,26 @@ export const flight = {
     return seg;
   },
   /** Crossings of plate p's chips past the ship over [sa, sb) under one motion segment. */
-  scanPlate(p: Plate, seg: MotionSeg, sa: number, sb: number, posA: number[], posB: number[], R: number, hits: SensorHit[]): void {
+  scanPlate(p: Plate, seg: MotionSeg, sa: number, sb: number, posA: number[], posB: number[], R: number, hits: SensorHit[],
+    geometry?: Pick<FlightEngine, 'plateX' | 'restAt'>): void {
     if (sb <= sa) return;
-    const X = view.plateX(p);
+    const X = geometry?.plateX ? geometry.plateX(p) : view.plateX(p);
     const A = this.polar(posA, X), B = this.polar(posB, X);
     const minDx = A.dx * B.dx <= 0 ? 0 : Math.min(Math.abs(A.dx), Math.abs(B.dx));
     if (minDx > R) return;
-    const rLo = Math.max(0.05, p.rIn - R), rHi = p.rOut + R;
-    if (Math.max(A.r, B.r) < rLo || Math.min(A.r, B.r) > rHi) return;
     const dy = posB[1] - posA[1], dz = posB[2] - posA[2];
     const d2 = dy * dy + dz * dz;
     const s = d2 === 0 ? 0 : clamp(-(posA[1] * dy + posA[2] * dz) / d2, 0, 1);
-    if (Math.hypot(posA[1] + s * dy, posA[2] + s * dz) < 0.05) return; // angle is meaningless on the axis
+    const rMin = Math.hypot(posA[1] + s * dy, posA[2] + s * dz), rMax = Math.max(A.r, B.r);
+    if (rMin < 0.05) return; // angle is meaningless on the axis
+    if (rMax < Math.max(0.05, p.rIn - R) || rMin > p.rOut + R) return;
     const thB = A.th + wrapPi(B.th - A.th);
     const psiA = seg.phi0 + seg.w * (sa - seg.b0) - A.th;
     const psiB = seg.phi0 + seg.w * (sb - seg.b0) - thB;
     if (psiA === psiB) return;
     const lo = Math.min(psiA, psiB) - 1e-6, hi = Math.max(psiA, psiB) + 1e-6;
-    const rMid = (A.r + B.r) / 2, rSlack = R + Math.abs(A.r - B.r) / 2;
     for (const c of p.chips) {
-      if (Math.abs(c.radius - rMid) > rSlack) continue;
+      if (c.radius < rMin - R || c.radius > rMax + R) continue;
       const target = -c.angle;
       let v = target + TAU * Math.ceil((lo - target) / TAU);
       while (v < hi) {
@@ -620,7 +717,8 @@ export const flight = {
           const fs = (Bh - sa) / (sb - sa);
           const P = this.polar(lerp3(posA, posB, fs), X);
           const d = Math.hypot(P.dx, c.radius - P.r);
-          if (d < R && !stack.restAt(p, Bh)) hits.push({ B: Bh, c, th: A.th + fs * (thB - A.th), d });
+          const rest = geometry?.restAt ? geometry.restAt(p, Bh) : stack.restAt(p, Bh);
+          if (d < R && !rest) hits.push({ B: Bh, c, th: A.th + fs * (thB - A.th), d });
         }
         v += TAU;
       }
@@ -634,16 +732,17 @@ export const flight = {
     let posA: number[], posB: number[];
     if (E.offline) {
       const cur = E.sensorCursor;
-      posA = cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : fc.shipAt(ta);
-      posB = fc.shipAt(tb);
+      posA = fc.activeAt ? fc.shipAt(ta) : cur && Math.abs(cur.t - ta) < 1e-9 ? cur.pos : fc.shipAt(ta);
+      posB = fc.shipAt(tb, true);
       E.sensorCursor = { t: tb, pos: posB };
     } else {
-      posA = fc.shipAt(ta); posB = fc.shipAt(tb);
+      posA = fc.shipAt(ta); posB = fc.shipAt(tb, true);
     }
     // corners of the recorded path inside this window (export replays of hand flight)
     const pathCuts = fc.knotsIn ? fc.knotsIn(ta, tb).map((t) => E.beatAt(t)) : [];
-    const anySolo = stack.anySolo();
-    for (const p of stack.plates) {
+    const plates = E.plates ? E.plates() : stack.plates;
+    const anySolo = plates.some((p) => p.solo);
+    for (const p of plates) {
       if (E.onlyPlate ? p !== E.onlyPlate : !p.audible(anySolo)) continue;
       // the motion being rendered (an export's own copy offline), split at segment
       // starts so ψ is never interpolated across an angle jump
@@ -657,13 +756,15 @@ export const flight = {
       for (let i = 0; i + 1 < cuts.length; i++) {
         const sa = cuts[i], sb = cuts[i + 1];
         if (sb - sa < 1e-12) continue;
+        if (fc.activeAt && !fc.activeAt(E.timeAtBeat((sa + sb) / 2))) continue;
         // ends of each piece: exact path where the context knows it, else window lerp
         const pa = i === 0 ? posA : pathCuts.length ? fc.shipAt(E.timeAtBeat(sa)) : lerp3(posA, posB, (sa - Ba) / (Bb - Ba));
-        const pb = i + 2 === cuts.length ? posB : pathCuts.length ? fc.shipAt(E.timeAtBeat(sb)) : lerp3(posA, posB, (sb - Ba) / (Bb - Ba));
-        this.scanPlate(p, this.segAt(m, sa), sa, sb, pa, pb, fc.R, hits);
+        const pb = i + 2 === cuts.length ? posB : pathCuts.length ? fc.shipAt(E.timeAtBeat(sb), true) : lerp3(posA, posB, (sb - Ba) / (Bb - Ba));
+        this.scanPlate(p, this.segAt(m, sa), sa, sb, pa, pb, fc.R, hits, E);
       }
       hits.sort((x, y) => x.B - y.B);
       for (const h of hits) {
+        if (fc.activeAt && !fc.activeAt(E.timeAtBeat(h.B))) continue;
         const gain = fc.sensorGain * Math.pow(1 - h.d / fc.R, 1.3);
         E.fire(p, h.c, E.timeAtBeat(h.B), h.th, h.B, gain, { sensor: true, dist: h.d });
         if (!E.offline) this.stats.sensor++;

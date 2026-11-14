@@ -13,6 +13,8 @@ import { mulberry32 } from '../src/core/util.ts';
 import { MAX_USER_SOUNDS, MAX_USER_SAMPLES, MAX_SOUND_ID } from '../src/core/project-limits.ts';
 import { installAudioBuffer, recordingBuffer, TestAudioBuffer } from './audio-buffer.mjs';
 
+const defaultUi = ui;
+
 // Exercise real sound import/remapping without requiring Web Audio in Node.
 function buffer(data = new Float32Array([0, 0.5, -0.25, 1]), sampleRate = 48000) {
   return {
@@ -42,7 +44,7 @@ beforeEach((t) => {
     panelWidth: () => 0, slots: [null, null, null, null], activeSlot: null,
     togglePlay() { engine.playing = !engine.playing; },
     toggleFlight() { if (flight.on) flight.exit(); else flight.enter(); },
-    syncAutopilot() {}, syncAll() {},
+    syncAutopilot() {}, syncAll() {}, cancelSoundWork() {},
   });
 });
 
@@ -127,11 +129,13 @@ test('complete nested validation rejects malformed projects without stopping or 
     const current = project.serialize();
     const currentSounds = sounds.list.slice();
     const pending = engine.pending = [{ kind: 'scene' }];
+    const generation = sounds.generation;
     assert.throws(() => validateProject(input), undefined, label);
     assert.throws(() => project.apply(input), undefined, label);
     assert.equal(engine.playing, true, label);
     assert.equal(engine.pending, pending, label);
     assert.deepEqual(sounds.list, currentSounds, label);
+    assert.equal(sounds.generation, generation, label);
     assert.deepEqual(project.serialize(), current, label);
     engine.playing = false;
   }
@@ -223,6 +227,41 @@ test('v1 JSON roundtrip preserves seeded material, settings, custom sound ids an
   assert.deepEqual(stack.plates[0].chips, chips);
   assert.deepEqual(project.serialize(), saved);
   assert.doesNotThrow(() => validateProject(project.serialize()));
+});
+
+test('project apply resets stopped phases and motion to the loaded seed instead of outgoing playback', () => {
+  stack.plates.forEach((plate, i) => { plate.seed = 1000 + i; plate.generate(); });
+  const saved = project.serialize();
+  const phases = stack.plates.map((plate) => plate.phase0);
+  for (const outgoingPhase of [-17.25, 0, 1, 28.5]) {
+    stack.plates.forEach((plate, i) => {
+      plate.seed = 2000 + i;
+      plate.generate();
+      plate.phiFrozen = outgoingPhase + i;
+      plate.motion = [{ b0: 0, phi0: outgoingPhase, w: -3 }, { b0: 9, phi0: i, w: 4 }];
+    });
+    project.apply(saved);
+    stack.plates.forEach((plate, i) => {
+      assert.equal(plate.phase0, phases[i]);
+      assert.equal(plate.phiFrozen, phases[i], 'the next stopped LOOP starts at the loaded canonical phase');
+      assert.equal(plate.angleAt(100, false), phases[i]);
+      assert.deepEqual(plate.motion, [{ b0: 0, phi0: phases[i], w: plate.omega() }]);
+    });
+  }
+});
+
+test('ordinary snapshot restore keeps frozen phases and motion until project replacement', () => {
+  const saved = stack.snapshot();
+  const outgoing = stack.plates.map((plate, i) => {
+    plate.phiFrozen = i + 0.375;
+    plate.motion = [{ b0: 0, phi0: i, w: 2 }, { b0: 12, phi0: 3, w: -1 }];
+    return { phiFrozen: plate.phiFrozen, motion: plate.motion };
+  });
+  stack.restore(saved);
+  stack.plates.forEach((plate, i) => {
+    assert.equal(plate.phiFrozen, outgoing[i].phiFrozen);
+    assert.equal(plate.motion, outgoing[i].motion);
+  });
 });
 
 test('legacy complete v1 JSON without builtinIds still opens and restores builtin sources', async () => {
@@ -340,6 +379,39 @@ test('an explicitly stale file import does not read the file or open audio', asy
   assertClearedLibrary();
 });
 
+for (const stage of ['read', 'decode']) {
+  test(`project replacement with the default bridge invalidates a deferred file ${stage}`, async (t) => {
+    installAudioBuffer(t);
+    registerUi(defaultUi);
+    const saved = project.serialize();
+    saved.sounds.builtins.GLASS = false;
+    saved.sounds.user.push(userSound(9, 'LOADED'));
+    saved.plates.forEach((plate) => { plate.sourceIds = [2, 9]; });
+    const reading = deferred(), decoding = deferred(), enteredDecode = deferred();
+    const file = new File(['audio'], 'outgoing.wav');
+    t.mock.method(file, 'arrayBuffer', () => reading.promise);
+    const decode = t.mock.fn(() => { enteredDecode.resolve(); return decoding.promise; });
+    t.mock.method(engine, 'ensureCtx', () => ({ decodeAudioData: decode }));
+    const importing = sounds.addFile(file);
+    if (stage === 'decode') { reading.resolve(new ArrayBuffer(4)); await enteredDecode.promise; }
+    const generation = sounds.generation;
+
+    project.apply(saved);
+    assert.notEqual(sounds.generation, generation);
+    const loaded = sounds.get(9), nextId = sounds.nextId;
+    if (stage === 'read') reading.resolve(new ArrayBuffer(4));
+    else decoding.resolve(recordingBuffer());
+    assert.equal(await importing, null);
+    assert.equal(decode.mock.callCount(), stage === 'decode' ? 1 : 0);
+    assert.equal(sounds.nextId, nextId);
+    assert.equal(sounds.get(9), loaded);
+    assert.deepEqual(sounds.list.filter((sound) => !sound.builtin), [loaded]);
+    assert.equal(sounds.byName('GLASS').enabled, false);
+    assert.equal(sounds.byName('TICK').enabled, true);
+    stack.plates.forEach((plate) => assert.deepEqual([...plate.sourceIds], [2, 9]));
+  });
+}
+
 for (const outcome of ['resolve', 'reject']) {
   test(`clearing during file reading discards a late ${outcome} without decoding or restoring sources`, async (t) => {
     const reading = deferred();
@@ -429,9 +501,13 @@ test('native buffer construction errors are staged before any machine mutation',
   t.mock.method(sounds, 'makeBuffer', () => { throw new Error('unsupported native sample rate'); });
   engine.playing = true;
   const before = project.serialize();
+  const generation = sounds.generation;
+  const cancel = t.mock.method(ui, 'cancelSoundWork');
   assert.throws(() => project.apply(saved), /unsupported native sample rate/);
   assert.equal(engine.playing, true);
   assert.deepEqual(project.serialize(), before);
+  assert.equal(sounds.generation, generation);
+  assert.equal(cancel.mock.callCount(), 0);
 });
 
 function userSound(id = 3, name = 'CUSTOM', pcm16 = 'AAA=', sampleRate = 48000) {
